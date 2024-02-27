@@ -7,11 +7,11 @@ Future work is to put this in a yaml file and load it for easy access
 """
 
 RADIUS_TARGET = 2.0
-N_OBSTACLES = 2
+N_OBSTACLES = 3
 OBX_MIN_RANGE = 50
 OBX_MAX_RANGE = 150
-OBX_MIN_RADIUS = 20
-OBX_MAX_RADIUS = 21
+OBX_MIN_RADIUS = 9
+OBX_MAX_RADIUS = 10
 SEED_NUMBER = 0
 
 
@@ -20,7 +20,7 @@ SEED_NUMBER = 0
 
 GOAL_STATE = [
     200.0, #x 
-    -200.0, #y 
+    200.0, #y 
     50.0,  #z 
     0.0,   #phi 
     0.0,   #theta
@@ -51,8 +51,8 @@ control_constraints = {
     'u_phi_max':   np.deg2rad(45),
     'u_theta_min':-np.deg2rad(10),
     'u_theta_max': np.deg2rad(10),
-    'u_psi_min':  -np.deg2rad(30),
-    'u_psi_max':   np.deg2rad(30),
+    'u_psi_min':  -np.deg2rad(45),
+    'u_psi_max':   np.deg2rad(45),
     'v_cmd_min':   16,
     'v_cmd_max':   30
 }

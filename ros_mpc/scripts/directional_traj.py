@@ -226,7 +226,7 @@ def main(args=None) -> None:
 	print_every = 10
 
 	goal = GOAL_STATE
-	idx_buffer = 2
+	idx_buffer = 1
 	
 	distance_tolerance = 20.0
 	
@@ -246,10 +246,10 @@ def main(args=None) -> None:
 		# print('State Info: ', traj_node.state_info)
 
 		goal = [goal[0], goal[1], goal[2], 
-				traj_node.state_info[3], 
-				traj_node.state_info[4], 
-				traj_node.state_info[5], 
-				traj_node.state_info[6]]
+				solution_results['phi'][idx_buffer], 
+				solution_results['theta'][idx_buffer], 
+				solution_results['psi'][idx_buffer], 
+				solution_results['v_cmd'][idx_buffer]]
 		
 		solution_results,end_time = plane_mpc.get_solution(traj_node.state_info, 
 														   goal, traj_node.control_info,
@@ -259,10 +259,8 @@ def main(args=None) -> None:
 		idx_step = traj_node.get_time_idx(mpc_params, end_time - start_time, idx_buffer)
 		
 		if counter % print_every == 0:
-			print(traj_node.state_info)
-			print(idx_step)
 			print('Distance Error: ', distance_error)
-		
+	
 		if distance_error <= distance_tolerance:
 			traj_node.get_logger().info('Goal Reached Shutting Down Node') 
 			traj_node.destroy_node()

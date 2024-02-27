@@ -81,12 +81,6 @@ class AvoidTrajNode(Node):
 													'mavros/local_position/odom', 
 													self.mavros_state_callback, 
 													qos_profile=SENSOR_QOS)
-		# else:        
-		# 	self.state_sub = self.create_subscription(Telem, 
-		# 		'telem', 
-		# 		self.state_callback, 
-		# 		self.sub_freq)
-			
 		if self.save_states:
 			self.init_history()
 
@@ -238,8 +232,7 @@ class AvoidTrajNode(Node):
 
 def main(args=None) -> None:
 	rclpy.init(args=args)    
-
-
+ 
 	plane = Plane()
 	plane_mpc = PlaneOptControl(
 		control_constraints=control_constraints,
@@ -256,7 +249,6 @@ def main(args=None) -> None:
 
 	goal = GOAL_STATE
 	idx_buffer = 1
-	ahead_idx = 2 # use the 8th index ahead of the current index
 	
 	distance_tolerance = 20.0
 	
@@ -267,14 +259,6 @@ def main(args=None) -> None:
  
 	solution_results,end_time = plane_mpc.get_solution(
      traj_node.state_info, goal, traj_node.control_info, get_cost=True)
-	
-	traj_node.state_info[0] = solution_results['x'][ahead_idx]
-	traj_node.state_info[1] = solution_results['y'][ahead_idx]
-	traj_node.state_info[2] = solution_results['z'][ahead_idx]
-	traj_node.state_info[3] = solution_results['phi'][ahead_idx]
-	traj_node.state_info[4] = solution_results['theta'][ahead_idx]
-	traj_node.state_info[5] = solution_results['psi'][ahead_idx]
-	traj_node.state_info[6] = solution_results['v_cmd'][ahead_idx]
 
 	while rclpy.ok():
      
@@ -287,10 +271,10 @@ def main(args=None) -> None:
 			)
 
 			goal = [goal[0], goal[1], goal[2], 
-					solution_results['phi'][ahead_idx], 
-					solution_results['theta'][ahead_idx], 
-					solution_results['psi'][ahead_idx], 
-					solution_results['v_cmd'][ahead_idx]]
+					solution_results['phi'][idx_buffer], 
+					solution_results['theta'][idx_buffer], 
+					solution_results['psi'][idx_buffer], 
+					solution_results['v_cmd'][idx_buffer]]
 	
 			rclpy.spin_once(traj_node)
 			solution_results,end_time = plane_mpc.get_solution(traj_node.state_info, 
@@ -300,15 +284,7 @@ def main(args=None) -> None:
 			idx_step = traj_node.get_time_idx(mpc_params, end_time - start_time, idx_buffer)
 			traj_node.publish_trajectory(solution_results, idx_step)
 
-			print('Distance Error: ', distance_error)
-			print("desired roll is: ", np.rad2deg(solution_results['phi'][idx_step]))
-			print("desired pitch is: ", np.rad2deg(solution_results['theta'][idx_step]))
-			print("desired yaw is: ", np.rad2deg(solution_results['psi'][idx_step]))
-			print("\n")
-
 			if counter % print_every == 0:
-				# print(traj_node.state_info)
-				# print(idx_step)
 				print('Distance Error: ', distance_error)
 			
 			if distance_error <= distance_tolerance:

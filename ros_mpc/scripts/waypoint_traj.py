@@ -231,7 +231,6 @@ def main(args=None) -> None:
 
     # TODO: flag this as a parameter
 	distance_tolerance = 20.0
-	
 	solution_results,end_time = plane_mpc.get_solution(traj_node.state_info, 
 														goal, traj_node.control_info,
 														get_cost=True)
@@ -245,7 +244,6 @@ def main(args=None) -> None:
 			(goal[0] - traj_node.state_info[0])**2 + 
 			(goal[1] - traj_node.state_info[1])**2 
 		)        
-		# print('State Info: ', traj_node.state_info)
 
 		goal = [goal[0], goal[1], goal[2], 
 				traj_node.state_info[3], 
@@ -256,8 +254,7 @@ def main(args=None) -> None:
 		solution_results,end_time = plane_mpc.get_solution(traj_node.state_info, 
 														   goal, traj_node.control_info,
 														   get_cost=True)
-		
-		
+	
 		idx_step = traj_node.get_time_idx(mpc_params, end_time - start_time, idx_buffer)
 		
 		if counter % print_every == 0:
