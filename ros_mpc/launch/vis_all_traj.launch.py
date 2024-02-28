@@ -88,6 +88,32 @@ def generate_launch_description() -> LaunchDescription:
         launch_arguments=directional_traj_config.items()
     )
     
+    
+    omni_traj_config = {
+        'scale_size': TextSubstitution(text='0.05'),
+        'life_time': TextSubstitution(text='2.0'),
+        'parent_frame': TextSubstitution(text='map'),
+        'child_frame': TextSubstitution(text='directional_traj_frame'),
+        'rate': TextSubstitution(text='30.0'),
+        'ns': TextSubstitution(text='directional_traj'),
+        'red_color': TextSubstitution(text='1.0'),
+        'green_color': TextSubstitution(text='0.0'),
+        'blue_color': TextSubstitution(text='0.0'), 
+        'topic_name': '/omni_trajectory'
+    }
+    
+    omni_traj_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([
+                FindPackageShare('rviz_drone'),
+                'launch',
+                'traj.launch.py'
+            ])
+        ),
+        launch_arguments=omni_traj_config.items()
+    )
+    
+    
     ### Actual Frames
     actual_fix_wing_broadcaster = Node(
         package='rviz_drone',
@@ -146,19 +172,14 @@ def generate_launch_description() -> LaunchDescription:
         executable='obstacle_vis.py',
         name='obstacle_visualizer',
         output='screen',
-        # parameters=[
-        #     {'scale_size': 0.05},
-        #     {'life_time': 2.0},
-        #     {'parent_frame': 'map'},
-        #     {'child_frame': 'obstacle_frame'},
-        #     {'rate': 30.0},
-        #     {'ns': 'obstacle'},
-        #     {'topic_name': 'obstacle_marker'},
-        #     {'red_color': 0.0},
-        #     {'green_color': 0.0},
-        #     {'blue_color': 0.0},
-        #     {'alpha_color': 0.8}
-        # ]
+    )
+    
+    #visualize the goal location 
+    goal_viz_node = Node(
+        package='rviz_drone',
+        executable='goal_vis.py',
+        name='goal_visualizer',
+        output='screen',
     )
     
     effector_scaled_broadcast_launch = IncludeLaunchDescription(
@@ -177,6 +198,7 @@ def generate_launch_description() -> LaunchDescription:
     ld.add_action(avoid_traj_launch)
     ld.add_action(waypoint_traj_launch)
     ld.add_action(directional_traj_launch)
+    ld.add_action(omni_traj_launch)
     
     # actual frame visualizers
     ld.add_action(actual_fix_wing_broadcaster)
@@ -185,6 +207,8 @@ def generate_launch_description() -> LaunchDescription:
     # scaled down visualizers
     ld.add_action(scaled_fix_wing_node)
     ld.add_action(obs_viz_node)
+    ld.add_action(goal_viz_node)
+    
     ld.add_action(effector_scaled_broadcast_launch)
     
     return ld

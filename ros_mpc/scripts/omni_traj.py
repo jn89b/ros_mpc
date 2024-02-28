@@ -10,7 +10,7 @@ from rclpy.node import Node
 
 from ros_mpc.PlaneOptControl import PlaneOptControl
 from ros_mpc.Effector import Effector
-from ros_mpc.aircraft_config import mpc_params, directional_effector_config, \
+from ros_mpc.aircraft_config import mpc_params, omni_effector_config, \
 	control_constraints, state_constraints, obs_avoid_params
 from ros_mpc.aircraft_config import GOAL_STATE, DONE_STATE
 
@@ -28,6 +28,44 @@ from mavros.base import SENSOR_QOS
 - Initialize Aircraft Model and 
 
 """
+
+#TODO update this function to take in the effector max and min range 
+#
+def find_driveby_direction(goal_position:np.ndarray, current_position:np.ndarray, 
+                            heading_rad:float, effector_range:float, 
+                            effector_min_range:float, goal_radius:float,
+                            robot_radius:float):
+    """
+    Finds the lateral offset directions of the omnidirectional effector
+    
+    """    
+    
+    range_diff = (effector_range - effector_min_range)/2
+    range_total = range_diff + robot_radius
+    
+    ego_unit_vector = np.array([np.cos(heading_rad), np.sin(heading_rad)])
+    
+    #swap the direction sign to get the normal vector
+    drive_by_vector_one = np.array([ego_unit_vector[1], -ego_unit_vector[0]])
+    drive_by_vector_two = np.array([-ego_unit_vector[1], ego_unit_vector[0]])
+    
+    drive_by_vector_one = drive_by_vector_one * range_total
+    drive_by_vector_two = drive_by_vector_two * range_total
+    
+    #pick the one closer to the current position
+    distance_one = np.linalg.norm(current_position - (goal_position + drive_by_vector_one))
+    distance_two = np.linalg.norm(current_position - (goal_position + drive_by_vector_two))
+    
+        
+    if distance_one < distance_two:
+        drive_by_vector = drive_by_vector_two
+    else:
+        drive_by_vector = drive_by_vector_one
+            
+    #apply to goal position
+    drive_by_position = goal_position + drive_by_vector
+    
+    return drive_by_position
 
 class DirectionalTrajNode(Node):
 	def __init__(self, 
@@ -64,7 +102,7 @@ class DirectionalTrajNode(Node):
 		
 		self.traj_pub = self.create_publisher(
 			CtlTraj, 
-			'directional_trajectory', 
+			'omni_trajectory', 
 			self.pub_freq)
 		
 		if sub_to_mavros:
@@ -158,7 +196,9 @@ class DirectionalTrajNode(Node):
 		self.control_info[2] = msg.yaw_rate
 		self.control_info[3] = np.sqrt(msg.vx**2 + msg.vy**2 + msg.vz**2) 
 
-	def publish_trajectory(self, solution_results:dict, idx_step:int) -> None:
+	def publish_trajectory(self, solution_results:dict, idx_step:int, 
+                        pylon_manuever:bool=False, pylon_phi_rad:float=0.0,
+                        pylon_vel:float=0.0) -> None:
 		x = solution_results['x']
 		y = solution_results['y']
 		z = solution_results['z']
@@ -174,7 +214,14 @@ class DirectionalTrajNode(Node):
 		x_ned = y
 		y_ned = x
 		z_ned = -z
-		
+  
+		#if pylon manuever is true, then we send our own roll and velocity commands
+		if pylon_manuever:
+			phi = np.zeros_like(phi)
+			v_cmd = np.ones_like(v_cmd)*20
+			phi = np.ones_like(phi)*pylon_phi_rad
+			pylon_vel = np.ones_like(v_cmd)*pylon_vel
+
 		traj_msg = CtlTraj()
 		#make sure its a list
 		traj_msg.x = x_ned.tolist()
@@ -210,21 +257,30 @@ def main(args=None) -> None:
 	traj_node = DirectionalTrajNode()
 	rclpy.spin_once(traj_node)
 	plane = Plane()
- 
-	dir_mpc_params = {
+	Q_val = 1E-2
+	R_val = 1E-2
+	omni_mpc_params = {
 		'N': 15,
-		'Q': ca.diag([1E-2, 1E-2, 0.1, 0.0, 0.0, 0.0, 0.0]),
-		'R': ca.diag([0.0, 0.0, 0.0, 0.1]),
+        'Q': ca.diag([0.1, 0.1, 0.1, 0.0, 0.0, 0.0, Q_val]),
+        'R': ca.diag([R_val, R_val, R_val, 0.0]),
 		'dt': 0.1
 	}
+ 
+	goal = GOAL_STATE
+	obs_avoid_params['x'] = np.append(obs_avoid_params['x'], goal[0])
+	obs_avoid_params['y'] = np.append(obs_avoid_params['y'], goal[1])
+	obs_avoid_params['z'] = np.append(obs_avoid_params['z'], goal[2])
+
+	radius_goal = (omni_effector_config['minor_radius'])
+	obs_avoid_params['radii'] = np.append(obs_avoid_params['radii'], radius_goal)
 
 	plane_mpc = PlaneOptControl(
 		control_constraints=control_constraints,
 		state_constraints=state_constraints,
-		mpc_params=dir_mpc_params,
+		mpc_params=omni_mpc_params,
 		casadi_model=plane,
 		use_pew_pew=True,
-		pew_pew_params=directional_effector_config,
+		pew_pew_params=omni_effector_config,
 		use_obstacle_avoidance=True,
 		obs_params=obs_avoid_params
 	)
@@ -233,49 +289,81 @@ def main(args=None) -> None:
 	counter = 1  
 	print_every = 10
 
-	goal = GOAL_STATE
-	idx_buffer = 5
+	idx_buffer = 1
 	
-	distance_tolerance = 15.0
+	distance_tolerance = 5.0
 	
 	solution_results,end_time = plane_mpc.get_solution(traj_node.state_info, 
 														goal, traj_node.control_info,
 														get_cost=True)
 	
+	final_states = np.array([goal[0], goal[1], goal[2]])
+
 	while rclpy.ok():
 		rclpy.spin_once(traj_node)
 
 		start_time = time.time()
 
 		distance_error = np.sqrt(
-			(goal[0] - traj_node.state_info[0])**2 + 
-			(goal[1] - traj_node.state_info[1])**2 
+			(GOAL_STATE[0] - traj_node.state_info[0])**2 + 
+			(GOAL_STATE[1] - traj_node.state_info[1])**2 
 		)        
 		# print('State Info: ', traj_node.state_info)
+		init_states = np.array([traj_node.state_info[0], 
+								traj_node.state_info[1], 
+								traj_node.state_info[2]])
+  
+		psi = traj_node.state_info[5]
+		driveby_direction = find_driveby_direction(final_states[:2], init_states[:2], 
+												psi, 
+												omni_effector_config['effector_range'],
+												omni_effector_config['minor_radius'],
+												obs_avoid_params['radii'][-1],
+												obs_avoid_params['safe_distance'])
 
-		goal = [goal[0], goal[1], goal[2], 
+		goal = [driveby_direction[0], driveby_direction[1], goal[2], 
 				solution_results['phi'][idx_buffer], 
 				solution_results['theta'][idx_buffer], 
 				solution_results['psi'][idx_buffer], 
 				solution_results['v_cmd'][idx_buffer]]
 		
+		#ground distance 
+		if distance_error <= omni_effector_config['effector_range'] + 10:
+			goal[2] = GOAL_STATE[2] + 28
+			goal[-1] = state_constraints['airspeed_min']
+
+  
 		solution_results,end_time = plane_mpc.get_solution(traj_node.state_info, 
 														   goal, traj_node.control_info,
 														   get_cost=True)
 		
 		
 		idx_step = traj_node.get_time_idx(mpc_params, end_time - start_time, idx_buffer)
-		
+		three_d_distance = np.sqrt(
+			(GOAL_STATE[0] - traj_node.state_info[0])**2 + 
+			(GOAL_STATE[1] - traj_node.state_info[1])**2 + 
+			(GOAL_STATE[2] - traj_node.state_info[2])**2
+		)
+  
 		if counter % print_every == 0:
 			print('Distance Error: ', distance_error)
-	
-		if distance_error <= distance_tolerance:
-			traj_node.get_logger().info('Goal Reached Shutting Down Node') 
-			traj_node.destroy_node()
-			rclpy.shutdown()
-			return    
+			print("Driveby Direction: ", driveby_direction)
+			print("Goal: ", three_d_distance)
 		
-		traj_node.publish_trajectory(solution_results, idx_step)
+		if distance_error <= omni_effector_config['effector_range'] + 10:
+			if solution_results['phi'][idx_buffer] >= 0:
+				phi = np.deg2rad(45)
+			else:
+				phi = np.deg2rad(-45)
+    
+			min_airspeed = state_constraints['airspeed_min']
+			traj_node.publish_trajectory(solution_results, idx_step, 
+                                	pylon_manuever=True, pylon_phi_rad=phi, 
+                                 	pylon_vel=min_airspeed)
+		else: 
+			traj_node.publish_trajectory(solution_results, idx_step)
+		
 		counter += 1
+    
 if __name__=='__main__':
 	main()

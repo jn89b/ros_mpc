@@ -50,6 +50,7 @@ install(PROGRAMS
   scripts/directional_traj.py
   scripts/avoid_traj.py
   scripts/waypoint_traj.py
+  scripts/omni_traj.py
   DESTINATION lib/${PROJECT_NAME}
 )
 ament_package()
