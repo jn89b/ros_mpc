@@ -8,6 +8,7 @@ import casadi as ca
 import rclpy
 import numpy as np
 import time 
+import pandas as pd
 
 from drone_interfaces.msg import Telem, CtlTraj
 from rclpy.node import Node
@@ -21,6 +22,7 @@ from ros_mpc.aircraft_config import GOAL_STATE, DONE_STATE
 import ros_mpc.rotation_utils as rot_utils
 from ros_mpc.models.Plane import Plane
 
+from std_msgs.msg import Float64
 import mavros
 from mavros.base import SENSOR_QOS
 
@@ -81,7 +83,11 @@ class WaypointTrajNode(Node):
 				'telem', 
 				self.state_callback, 
 				self.sub_freq)
-			
+   
+
+		self.cost_pub = self.create_publisher(Float64, 'waypoint_cost_val', 50)
+		self.time_sol_pub = self.create_publisher(Float64, 'waypoint_time_sol', 50)
+	
 		if self.save_states:
 			self.init_history()
 
@@ -194,18 +200,33 @@ class WaypointTrajNode(Node):
 		traj_msg.idx = idx_step
 				
 		self.traj_pub.publish(traj_msg)
+  
+		#check if solution has cost
+		if 'cost' in solution_results:
+			cost_val = solution_results['cost']
+			self.publish_cost(float(cost_val))
 
 	def get_time_idx(self, mpc_params:dict, 
 					 solution_time:float, idx_buffer:int=0) -> int:
 		time_rounded = round(solution_time, 1)
 		
 		if time_rounded <= 1:
-			time_rounded = 1
+			time_rounded = 1	
 		
 		ctrl_idx = mpc_params['dt']/time_rounded
 		idx = int(round(ctrl_idx)) + idx_buffer
 		
 		return idx
+
+	def publish_cost(self, cost:float) -> None:
+		cost_msg = Float64()
+		cost_msg.data = cost
+		self.cost_pub.publish(cost_msg)
+  
+	def publish_time(self, time_sol:float) -> None:
+		time_msg = Float64()
+		time_msg.data = time_sol
+		self.time_sol_pub.publish(time_msg)
 
 def main(args=None) -> None:
 	rclpy.init(args=args)    
@@ -226,11 +247,11 @@ def main(args=None) -> None:
 	counter = 1  
 	print_every = 10
 
-	goal = DONE_STATE
+	goal = GOAL_STATE
 	idx_buffer = 2
 
     # TODO: flag this as a parameter
-	distance_tolerance = 20.0
+	distance_tolerance = 10.0
 	solution_results,end_time = plane_mpc.get_solution(traj_node.state_info, 
 														goal, traj_node.control_info,
 														get_cost=True)
@@ -254,8 +275,9 @@ def main(args=None) -> None:
 		solution_results,end_time = plane_mpc.get_solution(traj_node.state_info, 
 														   goal, traj_node.control_info,
 														   get_cost=True)
-	
-		idx_step = traj_node.get_time_idx(mpc_params, end_time - start_time, idx_buffer)
+		delta_time = time.time() - start_time
+		idx_step = traj_node.get_time_idx(mpc_params, delta_time, idx_buffer)
+		traj_node.publish_time(float(delta_time))
 		
 		if counter % print_every == 0:
 			print(traj_node.state_info)
@@ -264,6 +286,7 @@ def main(args=None) -> None:
 		
 		if distance_error <= distance_tolerance:
 			traj_node.get_logger().info('Goal Reached Shutting Down Node') 
+			#check if save states is flagged
 			traj_node.destroy_node()
 			rclpy.shutdown()
 			return    

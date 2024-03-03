@@ -39,7 +39,7 @@ class PlaneOptControl(OptimalControlProblem):
 			if self.Effector.effector_type == 'omnidirectional':
 				#we need to add an additional parameter P to the optimization problem
 				self.driveby_location = ca.SX.sym('driveby_location', 3)
-			
+
 		#time constraint optimization
 		#user sets some time, convert that to index and use that as a constraint
 		self.use_time_constraints = use_time_constraints
@@ -326,14 +326,13 @@ class PlaneOptControl(OptimalControlProblem):
 			dz = target_location[2] - z_pos
 					
 			dtarget = ca.sqrt((dx)**2 + (dy)**2 + (dz)**2)
+			lat_dist = ca.sqrt((dx)**2 + (dy)**2)
 			#los_target = ca.vertcat(dx, dy)
 			los_target = ca.atan2(dy, dx)
-			
-			#slow down cost  
-							
+			  
 			#these exponential functions will be used to account for the distance and angle of the target
 			#the closer we are to the target the more the distance factor will be close to 1
-			error_dist_factor = ca.exp(-dtarget/self.Effector.effector_range)
+			error_dist_factor = ca.exp(-lat_dist/self.Effector.effector_range)
 			#error_dist = dtarget/self.Effector.effector_range
 			
 			#the closer we are to the target the more the angle factor will be close to 1
@@ -357,7 +356,7 @@ class PlaneOptControl(OptimalControlProblem):
 			quad_v_max = (v_cmd - v_max)**2
 			#quad_v_min = (v_cmd - v_min)**2
 			quad_v_min = (v_cmd - v_min)**2
-			vel_penalty = ca.if_else(error_dist_factor <= 0.2, 
+			vel_penalty = ca.if_else(error_dist_factor <= 0.05, 
 									 quad_v_max, quad_v_min)
 
 			#all other controls except for the velocity

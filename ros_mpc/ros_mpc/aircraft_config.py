@@ -6,16 +6,15 @@ This file contains the aircraft configurations all in one place
 Future work is to put this in a yaml file and load it for easy access
 """
 
-RADIUS_TARGET = 5.0
-N_OBSTACLES = 1
-OBX_MIN_RANGE = 0
+RADIUS_TARGET = 1.0
+N_OBSTACLES = 20
+OBX_MIN_RANGE = -150
 OBX_MAX_RANGE = 150
-OBX_MIN_RADIUS = 20
-OBX_MAX_RADIUS = 30
+OBX_MIN_RADIUS = 5
+OBX_MAX_RADIUS = 12
 SEED_NUMBER = 0
 
-
-# This is dumb but will work for now, should have a better way to do this
+#TODO: This is dumb but will work for now, should have a better way to do this
 # probably make a service to update the new goal state 
 GOAL_STATE = [
     200.0, #x 
@@ -75,13 +74,13 @@ state_constraints = {
 mpc_params = {
     'N': 15,
     'Q': ca.diag([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
-    'R': ca.diag([0.5, 0.5, 0.5, 0.5]),
+    'R': ca.diag([0.1, 0.1, 0.1, 0.1]),
     'dt': 0.1
 }
 
 directional_effector_config = {
-        'effector_range': 100, 
-        'effector_power': 100, 
+        'effector_range': 40, 
+        'effector_power': 10E3, 
         'effector_type': 'directional_3d', 
         'effector_angle': np.deg2rad(60), #double the angle of the cone, this will be divided to two
         'weight': 1, 
@@ -108,14 +107,12 @@ omni_effector_config = {
         'minor_radius': 28
         }
 
-
 mpc_params_load = {
     'N': 30,
     'Q': ca.diag([1E-2, 1E-2, 1E-2, 0, 0, 0.0, 0.0]),
     'R': ca.diag([0.1, 0.1, 0.1, 0.1]),
     'dt': 0.1
 }
-
 
 control_constraints_load = {
     'u_phi_min':  -np.deg2rad(45),

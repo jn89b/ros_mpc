@@ -13,13 +13,15 @@ Uses the rviz_drone package to visualize all the trajectories of the drone
 
 def generate_launch_description() -> LaunchDescription:
     
+    rate_str = '50.0'
+    rate_val = float(50.0)
     ### Avoid Trajectory Visualization #### 
     avoid_traj_config = {
         'scale_size': TextSubstitution(text='0.05'),
         'life_time': TextSubstitution(text='2.0'),
         'parent_frame': TextSubstitution(text='map'),
         'child_frame': TextSubstitution(text='avoid_traj_frame'),
-        'rate': TextSubstitution(text='30.0'),
+        'rate': TextSubstitution(text=rate_str),
         'ns': TextSubstitution(text='avoid_traj'),
         'red_color': TextSubstitution(text='0.0'),
         'green_color': TextSubstitution(text='0.0'),
@@ -45,7 +47,7 @@ def generate_launch_description() -> LaunchDescription:
         'life_time': TextSubstitution(text='0.01'),
         'parent_frame': TextSubstitution(text='map'),
         'child_frame': TextSubstitution(text='waypoint_traj_frame'),
-        'rate': TextSubstitution(text='30.0'),
+        'rate': TextSubstitution(text=rate_str),
         'ns': TextSubstitution(text='waypoint_traj'),
         'red_color': TextSubstitution(text='0.0'),
         'green_color': TextSubstitution(text='1.0'),
@@ -69,7 +71,7 @@ def generate_launch_description() -> LaunchDescription:
         'life_time': TextSubstitution(text='2.0'),
         'parent_frame': TextSubstitution(text='map'),
         'child_frame': TextSubstitution(text='directional_traj_frame'),
-        'rate': TextSubstitution(text='30.0'),
+        'rate': TextSubstitution(text=rate_str),
         'ns': TextSubstitution(text='directional_traj'),
         'red_color': TextSubstitution(text='1.0'),
         'green_color': TextSubstitution(text='0.0'),
@@ -94,7 +96,7 @@ def generate_launch_description() -> LaunchDescription:
         'life_time': TextSubstitution(text='2.0'),
         'parent_frame': TextSubstitution(text='map'),
         'child_frame': TextSubstitution(text='directional_traj_frame'),
-        'rate': TextSubstitution(text='30.0'),
+        'rate': TextSubstitution(text=rate_str),
         'ns': TextSubstitution(text='directional_traj'),
         'red_color': TextSubstitution(text='1.0'),
         'green_color': TextSubstitution(text='0.0'),
@@ -129,7 +131,7 @@ def generate_launch_description() -> LaunchDescription:
             {'yaw': 0.0},
             {'parent_frame': 'map'},
             {'child_frame': 'actual_fixed_wing_frame'},
-            {'rate': 30.0}
+            {'rate': rate_val}
         ]
         )
     
@@ -161,7 +163,7 @@ def generate_launch_description() -> LaunchDescription:
             {'yaw': 0.0},
             {'parent_frame': 'map'},
             {'child_frame': 'fixed_wing_frame'},
-            {'rate': 30.0}
+            {'rate': rate_val}
         ]
         )
     
