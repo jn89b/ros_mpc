@@ -7,12 +7,17 @@ Future work is to put this in a yaml file and load it for easy access
 """
 
 RADIUS_TARGET = 1.0
-N_OBSTACLES = 20
+N_OBSTACLES_NEAR_GOAL = 5
+N_OBSTACLES = 1
 OBX_MIN_RANGE = -150
 OBX_MAX_RANGE = 150
-OBX_MIN_RADIUS = 5
-OBX_MAX_RADIUS = 12
+OBX_MIN_RADIUS = 3
+OBX_MAX_RADIUS = 10
 SEED_NUMBER = 0
+USE_OBSTACLES_NEAR_GOAL = True
+USE_WALL = False
+USE_RANDOM = False
+
 
 #TODO: This is dumb but will work for now, should have a better way to do this
 # probably make a service to update the new goal state 
@@ -38,10 +43,54 @@ DONE_STATE = [
 
 # This is dumb but will work for now, should have a better way to do this
 np.random.seed(SEED_NUMBER)
-obx = np.random.randint(OBX_MIN_RANGE, OBX_MAX_RANGE, N_OBSTACLES)
-oby = np.random.randint(OBX_MIN_RANGE, OBX_MAX_RANGE, N_OBSTACLES)
-obz = np.random.randint(0, 80, N_OBSTACLES)
-radii = np.random.randint(OBX_MIN_RADIUS, OBX_MAX_RADIUS, N_OBSTACLES)
+OBSTACLE_BUFFER = 20
+if USE_OBSTACLES_NEAR_GOAL:
+    obx = np.random.randint(GOAL_STATE[0], 
+                            GOAL_STATE[0]+OBSTACLE_BUFFER,
+                            N_OBSTACLES_NEAR_GOAL)
+    oby = np.random.randint(GOAL_STATE[1],
+                            GOAL_STATE[1]+OBSTACLE_BUFFER,
+                            N_OBSTACLES_NEAR_GOAL)
+    obz = np.random.randint(GOAL_STATE[2],
+                            GOAL_STATE[2]+OBSTACLE_BUFFER,
+                            N_OBSTACLES_NEAR_GOAL)
+    radii = np.random.randint(OBX_MIN_RADIUS, OBX_MAX_RADIUS, N_OBSTACLES_NEAR_GOAL)
+    
+    if USE_RANDOM:
+        obx_random = np.random.randint(OBX_MIN_RANGE, OBX_MAX_RANGE, N_OBSTACLES)
+        oby_random = np.random.randint(OBX_MIN_RANGE, OBX_MAX_RANGE, N_OBSTACLES)
+        obz_random = np.random.randint(0, 80, N_OBSTACLES)
+        radii_random = np.random.randint(OBX_MIN_RADIUS, OBX_MAX_RADIUS, N_OBSTACLES)
+        
+        obx = np.append(obx, obx_random)
+        oby = np.append(oby, oby_random)
+        obz = np.append(obz, obz_random)
+        radii = np.append(radii, radii_random)
+elif USE_WALL:
+    
+    #generate wall along the x axis for the goal state
+    obx = np.arange(GOAL_STATE[0]+1-OBSTACLE_BUFFER, GOAL_STATE[0]+1+OBSTACLE_BUFFER)
+    #keep y and z constant
+    oby = np.random.randint(GOAL_STATE[1], GOAL_STATE[1]+1, len(obx))
+    obz = np.random.randint(GOAL_STATE[2], GOAL_STATE[2]+1, len(obx))
+    radii = np.random.randint(OBX_MIN_RADIUS, OBX_MIN_RADIUS+1, len(obx))
+
+elif USE_RANDOM:
+    obx = np.random.randint(OBX_MIN_RANGE, OBX_MAX_RANGE, N_OBSTACLES)
+    oby = np.random.randint(OBX_MIN_RANGE, OBX_MAX_RANGE, N_OBSTACLES)
+    obz = np.random.randint(0, 80, N_OBSTACLES)
+    radii = np.random.randint(OBX_MIN_RADIUS, OBX_MAX_RADIUS, N_OBSTACLES)
+    
+else: 
+    # obx = np.array([50])
+    # oby = np.array([50])
+    # obz = np.array([50])
+    # radii = np.array([5])
+    obx = np.random.randint(10000, 10001, N_OBSTACLES)
+    oby = np.random.randint(10000, 10001, N_OBSTACLES)
+    obz = np.random.randint(0, 80, N_OBSTACLES)
+    radii = np.random.randint(OBX_MIN_RADIUS, OBX_MAX_RADIUS, N_OBSTACLES)
+    
 
 control_constraints = {
     'u_phi_min':  -np.deg2rad(45),
@@ -60,7 +109,7 @@ state_constraints = {
     'y_min': -np.inf,
     'y_max': np.inf,
     'z_min': 40,
-    'z_max': 95,
+    'z_max': 65,
     'phi_min':  -np.deg2rad(50),
     'phi_max':   np.deg2rad(50),
     'theta_min':-np.deg2rad(10),
@@ -73,24 +122,25 @@ state_constraints = {
 
 mpc_params = {
     'N': 15,
-    'Q': ca.diag([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
-    'R': ca.diag([0.1, 0.1, 0.1, 0.1]),
+    'Q': ca.diag([0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1]),
+    'R': ca.diag([0.0, 0.0, 0.0, 0.05]),
     'dt': 0.1
 }
 
 directional_effector_config = {
-        'effector_range': 40, 
+        'effector_range': 20, 
         'effector_power': 10E3, 
         'effector_type': 'directional_3d', 
         'effector_angle': np.deg2rad(60), #double the angle of the cone, this will be divided to two
-        'weight': 1, 
-        'radius_target': RADIUS_TARGET
+        'weight': 10,
+        'k': 0.1, #this is a tuning parameter for exp function (0-1), the lower the value the less steep the curve
+        'radius_target': RADIUS_TARGET #this is the radius of the target, for avoidance
         }
 
 #might need to set the obstacles or update it later on 
 obs_avoid_params = {
     'weight': 1E-10,
-    'safe_distance': 3.0,
+    'safe_distance': 4.5,
     'x': obx,
     'y': oby,
     'z': obz, 
@@ -98,19 +148,20 @@ obs_avoid_params = {
 }
 
 omni_effector_config = {
-        'effector_range': 50, 
-        'effector_power': 1, 
+        'effector_range': 12,
+        'effector_power': 10E3, 
         'effector_type': 'omnidirectional', 
-        'effector_angle': np.deg2rad(60), #double the angle of the cone, this will be divided to two
-        'weight': 1, 
+        'effector_angle': np.deg2rad(160), #double the angle of the cone, this will be divided to two
+        'weight': 10, 
+        'k': 0.2, #this is a tuning parameter for exp function (0-1), the lower the value the less steep the curve
         'radius_target': RADIUS_TARGET,
-        'minor_radius': 28
+        'minor_radius': 3.0
         }
 
 mpc_params_load = {
     'N': 30,
-    'Q': ca.diag([1E-2, 1E-2, 1E-2, 0, 0, 0.0, 0.0]),
-    'R': ca.diag([0.1, 0.1, 0.1, 0.1]),
+    'Q': ca.diag([1E-2, 1E-2, 1E-2, 1E-2, 1E-2, 1E-2, 1E-2]),
+    'R': ca.diag([0.1, 0.1, 0.1, 0.0]),
     'dt': 0.1
 }
 

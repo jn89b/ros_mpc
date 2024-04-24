@@ -11,8 +11,8 @@ from rclpy.node import Node
 from ros_mpc.PlaneOptControl import PlaneOptControl
 from ros_mpc.Effector import Effector
 from ros_mpc.aircraft_config import mpc_params, directional_effector_config, \
-    control_constraints, state_constraints, obs_avoid_params
-from ros_mpc.aircraft_config import GOAL_STATE, DONE_STATE
+    control_constraints, state_constraints, obs_avoid_params, omni_effector_config
+from ros_mpc.aircraft_config import GOAL_STATE, DONE_STATE, RADIUS_TARGET
 
 import ros_mpc.rotation_utils as rot_utils
 from ros_mpc.models.Plane import Plane
@@ -37,7 +37,7 @@ def to_avoid(current_position:np.ndarray, current_heading:float,
              obstacles:np.ndarray, r_threshold:float, 
              K:int=5, 
              dot_product_threshold:float=0.5, 
-             distance_buffer_m:float=20, 
+             distance_buffer_m:float=10, 
              use_nearest_ref:bool=True,
              ref_point:np.ndarray=None) -> tuple:
     
@@ -70,24 +70,28 @@ def to_avoid(current_position:np.ndarray, current_heading:float,
  
     # dot_product = [d[1] for d in danger_zones]
     # danger_zones = [d[0] for d in danger_zones]
- 
+    radius_obs = [d[-1] for d in danger_zones]    
+    
     max_dot_obs = np.argmax(dot_product)
+    #get max radius of obstacle
+    max_radius = max(radius_obs)
     
     # if max_dot_obs < dot_product_threshold:
     #     return False, None
-    
     max_dot_obs = danger_zones[max_dot_obs]
-        
+    robot_radius = obs_avoid_params['safe_distance'] + max_radius + distance_buffer_m
     driveby_position = avoid_tools.find_driveby_direction(
                                                         goal_position=max_dot_obs[:2], 
                                                         current_position=current_position[:2], 
                                                         heading_rad=current_heading,
-                                                        obs_radius=max_dot_obs[-1], 
-                                                        robot_radius=r_threshold/3 + max_dot_obs[-1], 
+                                                        obs_radius=max_radius, 
+                                                        robot_radius=robot_radius, 
                                                         consider_obstacles=True, \
                                                         danger_zones=nearest_obstacles,
                                                         use_nearest_ref=use_nearest_ref, 
                                                         ref_point=ref_point)
+ 
+    print("driveby_position:", driveby_position)
  
     return True, driveby_position
 
@@ -145,8 +149,6 @@ class DirectionalTrajNode(Node):
         self.time_sol_pub = self.create_publisher(Float64, 'waypoint_time_sol', 50)
         self.driveby_pos_pub = self.create_publisher(PoseStamped, 
                                                      'driveby_position', 50)
-        # if self.save_states:
-        # 	self.init_history()
 
     def publish_driveby_position(self, driveby_position:np.ndarray) -> None:
         driveby_msg = PoseStamped()
@@ -302,11 +304,22 @@ def main(args=None) -> None:
  
     dir_mpc_params = {
         'N': 15,
-        'Q': ca.diag([1E-2, 1E-2, 1E-2, 1E-2, 1E-2, 1E-2, 1E-2]),
-        'R': ca.diag([0.0, 0.0, 0.0, 0.2]),
+        'Q': ca.diag([1E-3, 1E-3, 1E-3, 1E-2, 1E-2, 1E-2, 1E-2]),
+        'R': ca.diag([0.1, 0.1, 0.1, 0.1]),
         'dt': 0.1
     }
 
+    # plane_mpc = PlaneOptControl(
+    #     control_constraints=control_constraints,
+    #     state_constraints=state_constraints,
+    #     mpc_params=dir_mpc_params,
+    #     casadi_model=plane,
+    #     use_pew_pew=True,
+    #     pew_pew_params=directional_effector_config,
+    #     use_obstacle_avoidance=True,
+    #     obs_params=obs_avoid_params
+    # )
+    
     plane_mpc = PlaneOptControl(
         control_constraints=control_constraints,
         state_constraints=state_constraints,
@@ -336,7 +349,7 @@ def main(args=None) -> None:
     print_every = 10
 
     goal = GOAL_STATE
-    idx_buffer = 5
+    idx_buffer = 5 
     
     distance_tolerance = 5.0
     
@@ -348,37 +361,56 @@ def main(args=None) -> None:
     obs_y = obs_avoid_params['y']
     obs_z = obs_avoid_params['z']
     obs_radii = obs_avoid_params['radii']
-    obstacles = np.array([obs_x, obs_y, obs_z, obs_radii]).T
-    
-    min_velocity = state_constraints['airspeed_min']
+
+    obs_x = np.append(obs_x, GOAL_STATE[0])
+    obs_y = np.append(obs_y, GOAL_STATE[1])
+    obs_z = np.append(obs_z, GOAL_STATE[2])
+    obs_radii = np.append(obs_radii, RADIUS_TARGET)
+        
+    obstacles = np.array([obs_x, obs_y, obs_z, obs_radii]).T    
+    min_velocity = state_constraints['airspeed_min'] + 1
     max_velocity = state_constraints['airspeed_max']
     max_phi = control_constraints['u_phi_max']
+    max_psi = control_constraints['u_psi_max']
     
     min_radius = min_velocity**2 / (9.81*np.tan(max_phi))
  
+    MISSION_COMPLETE = False
+    goal_ref = GOAL_STATE
+    JUST_AVOIDED = False
+    
+    CRASH = False
+    
     while rclpy.ok():
         rclpy.spin_once(traj_node)
 
         start_time = time.time()
 
         distance_error = np.sqrt(
-            (GOAL_STATE[0] - traj_node.state_info[0])**2 + 
-            (GOAL_STATE[1] - traj_node.state_info[1])**2 
+            (goal_ref[0] - traj_node.state_info[0])**2 + 
+            (goal_ref[1] - traj_node.state_info[1])**2 
         )        
         
         curr_pos = np.array([traj_node.state_info[0], traj_node.state_info[1]])
         
         start_time = time.time()
+        if distance_error <= directional_effector_config['effector_range']:
+            threshold = min_radius
+            dot_product_threshold = 0.6
+        else:
+            threshold = min_radius
+            dot_product_threshold = 0.6
+            
         avoid, driveby_position = to_avoid(
             current_position=curr_pos,
             current_heading=traj_node.state_info[5],
             obstacles=obstacles,
             r_threshold=min_radius,
-            dot_product_threshold=0.8,
+            dot_product_threshold=dot_product_threshold ,
             K=10,
-            distance_buffer_m=min_radius,
-            use_nearest_ref=True,
-            ref_point=GOAL_STATE[:2])
+            distance_buffer_m=5,
+            use_nearest_ref=False,
+            ref_point=goal_ref[:2])
         end_time = time.time()
   
         if avoid:
@@ -403,22 +435,14 @@ def main(args=None) -> None:
                 phi_multiplier = 1.0
                 
             dlat = np.linalg.norm(driveby_position - curr_pos)
-            dz = GOAL_STATE[2] - traj_node.state_info[2]
+            dz = goal_ref[2] - traj_node.state_info[2]
             R = np.sqrt(dlat**2 + dz**2)
             phi = np.arctan(max_velocity**2 / (9.81*R))
             # phi_desired = phi * phi_multiplier
             phi_desired = max_phi * phi_multiplier
-                        
-            # #make sure phi is within the constraints
-            # if phi_desired < -max_phi:
-            #     phi_desired = -max_phi
-            # elif phi_desired > max_phi:
-            #     phi_desired = max_phi
+            #phi_desired = -9.81 * np.tan(phi) / max_velocity**2           
+            yaw_desired = max_psi * phi_multiplier
             
-            # print("phi_desired:", np.rad2deg(phi_desired))
-            yaw_desired = np.arctan2(driveby_position[1] - curr_pos[1], 
-                                     driveby_position[0] - curr_pos[0])
-        
             z_ref = traj_node.state_info[2]
             goal = [driveby_position[0], driveby_position[1], goal[2],
                                 phi_desired, 
@@ -428,11 +452,10 @@ def main(args=None) -> None:
             solution_results, end_time = avoid_mpc.get_solution(
                 traj_node.state_info, goal, traj_node.control_info, get_cost=True)
             
-            # driveby_position = np.array([driveby_position[0], driveby_position[1], z_ref])
-            # traj_node.publish_driveby_position(driveby_position)
+            # JUST_AVOIDED = True
             
         else:
-            goal = [GOAL_STATE[0], GOAL_STATE[1], goal[2], 
+            goal = [goal_ref[0], goal_ref[1], goal_ref[2], 
                     solution_results['phi'][idx_buffer], 
                     solution_results['theta'][idx_buffer], 
                     solution_results['psi'][idx_buffer], 
@@ -441,6 +464,7 @@ def main(args=None) -> None:
             solution_results,end_time = plane_mpc.get_solution(traj_node.state_info, 
                                                             goal, traj_node.control_info,
                                                             get_cost=True)
+            JUST_AVOIDED = False
         
         # delta_time = time.time() - start_time
         idx_step = traj_node.get_time_idx(mpc_params, end_time - start_time, idx_buffer)
@@ -450,9 +474,11 @@ def main(args=None) -> None:
     
         if distance_error <= distance_tolerance:
             traj_node.get_logger().info('Goal Reached Shutting Down Node') 
-            traj_node.destroy_node()
-            rclpy.shutdown()
-            return    
+            goal_ref = DONE_STATE
+            print("Mission Complete")
+            # traj_node.destroy_node()
+            # rclpy.shutdown()
+            # return    
         
         traj_node.publish_trajectory(solution_results, idx_step)
         counter += 1

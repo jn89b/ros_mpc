@@ -13,8 +13,8 @@ Uses the rviz_drone package to visualize all the trajectories of the drone
 
 def generate_launch_description() -> LaunchDescription:
     
-    rate_str = '50.0'
-    rate_val = float(50.0)
+    rate_str = '30.0'
+    rate_val = float(30.0)
     ### Avoid Trajectory Visualization #### 
     avoid_traj_config = {
         'scale_size': TextSubstitution(text='0.05'),
@@ -197,10 +197,10 @@ def generate_launch_description() -> LaunchDescription:
     # set the actual frame of the aicraft
     ld = LaunchDescription()
     #trajectory visualizers
-    ld.add_action(avoid_traj_launch)
-    ld.add_action(waypoint_traj_launch)
+    #ld.add_action(avoid_traj_launch)
+    #ld.add_action(waypoint_traj_launch)
     ld.add_action(directional_traj_launch)
-    ld.add_action(omni_traj_launch)
+    # ld.add_action(omni_traj_launch)
     
     # actual frame visualizers
     ld.add_action(actual_fix_wing_broadcaster)

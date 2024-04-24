@@ -140,18 +140,12 @@ class Plane():
         k2 = self.function(x + dt/2 * k1, u)
         k3 = self.function(x + dt/2 * k2, u)
         k4 = self.function(x + dt * k3, u)
-        
+    
         next_step = x + dt/6 * (k1 + 2*k2 + 2*k3 + k4)
-        
+
         #return as numpy row vector
         if use_numeric:
             next_step = np.array(next_step).flatten()
             return next_step
         else:
             return x + dt/6 * (k1 + 2*k2 + 2*k3 + k4)
-    
-    
-
-
-    
-    

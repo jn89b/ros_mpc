@@ -22,7 +22,7 @@ def does_right_side_have_more_obstacles(ego_heading:float,
         obs_position = danger_zones[i][:2]
         
         #compute los from ego to obstacle
-        los_vector = ego_unit_vector - obs_position
+        los_vector = obs_position - ego_unit_vector
         los_vector /= np.linalg.norm(los_vector)
         cross_product = np.cross(ego_unit_vector, los_vector)
 
@@ -111,10 +111,22 @@ def find_driveby_direction(goal_position:np.ndarray, current_position:np.ndarray
         distance_two = np.linalg.norm(current_position \
             - (ref_point + drive_by_vector_two))
         
+        #
+        # dot_one = np.dot(ego_unit_vector, drive_by_vector_one)
+        # dot_two = np.dot(ego_unit_vector, drive_by_vector_two)
+        
+        # #pick the one that is in the same direction as the ego
+        # if dot_one > dot_two:
+        #     drive_by_vector = drive_by_vector_one
+        # else:
+        #     drive_by_vector = drive_by_vector_two
+        
         if distance_one < distance_two:
             drive_by_vector = drive_by_vector_two
         else:
             drive_by_vector = drive_by_vector_one
+            
+        #
             
     else:  
         if distance_one < distance_two:
@@ -199,6 +211,7 @@ def find_danger_zones(obstacles:np.ndarray,
         if ego_position.shape[0] != 2:
             ego_position = ego_position[:2]
     
+    
     danger_zones = []
     new_dot_products = []
     for i, obs, in enumerate(obstacles):
@@ -210,5 +223,5 @@ def find_danger_zones(obstacles:np.ndarray,
             #compute the danger zone
             new_dot_products.append(dot_products[i])
             danger_zones.append(obs)
-            
+
     return danger_zones, new_dot_products
