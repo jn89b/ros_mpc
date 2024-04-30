@@ -77,8 +77,7 @@ elif USE_DESIRED_OBSTACLES:
     obx = np.array([50])
     oby = np.array([50])
     obz = np.array([50])
-    radii = np.array([20])
-    
+    radii = np.array([50])
 elif USE_RANDOM:
     obx = np.random.randint(OBX_MIN_RANGE, OBX_MAX_RANGE, N_OBSTACLES)
     oby = np.random.randint(OBX_MIN_RANGE, OBX_MAX_RANGE, N_OBSTACLES)
