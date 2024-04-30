@@ -396,10 +396,10 @@ def main(args=None) -> None:
         start_time = time.time()
         if distance_error <= directional_effector_config['effector_range']:
             threshold = min_radius
-            dot_product_threshold = 0.6
+            dot_product_threshold = 0.5
         else:
             threshold = min_radius
-            dot_product_threshold = 0.6
+            dot_product_threshold = 0.5
             
         avoid, driveby_position = to_avoid(
             current_position=curr_pos,

@@ -8,16 +8,16 @@ Future work is to put this in a yaml file and load it for easy access
 
 RADIUS_TARGET = 1.0
 N_OBSTACLES_NEAR_GOAL = 5
-N_OBSTACLES = 1
+N_OBSTACLES = 0
 OBX_MIN_RANGE = -150
 OBX_MAX_RANGE = 150
 OBX_MIN_RADIUS = 3
 OBX_MAX_RADIUS = 10
 SEED_NUMBER = 0
-USE_OBSTACLES_NEAR_GOAL = True
+USE_OBSTACLES_NEAR_GOAL = False
+USE_DESIRED_OBSTACLES = True
 USE_WALL = False
 USE_RANDOM = False
-
 
 #TODO: This is dumb but will work for now, should have a better way to do this
 # probably make a service to update the new goal state 
@@ -67,20 +67,23 @@ if USE_OBSTACLES_NEAR_GOAL:
         obz = np.append(obz, obz_random)
         radii = np.append(radii, radii_random)
 elif USE_WALL:
-    
     #generate wall along the x axis for the goal state
     obx = np.arange(GOAL_STATE[0]+1-OBSTACLE_BUFFER, GOAL_STATE[0]+1+OBSTACLE_BUFFER)
     #keep y and z constant
     oby = np.random.randint(GOAL_STATE[1], GOAL_STATE[1]+1, len(obx))
     obz = np.random.randint(GOAL_STATE[2], GOAL_STATE[2]+1, len(obx))
     radii = np.random.randint(OBX_MIN_RADIUS, OBX_MIN_RADIUS+1, len(obx))
-
+elif USE_DESIRED_OBSTACLES:
+    obx = np.array([50])
+    oby = np.array([50])
+    obz = np.array([50])
+    radii = np.array([20])
+    
 elif USE_RANDOM:
     obx = np.random.randint(OBX_MIN_RANGE, OBX_MAX_RANGE, N_OBSTACLES)
     oby = np.random.randint(OBX_MIN_RANGE, OBX_MAX_RANGE, N_OBSTACLES)
     obz = np.random.randint(0, 80, N_OBSTACLES)
     radii = np.random.randint(OBX_MIN_RADIUS, OBX_MAX_RADIUS, N_OBSTACLES)
-    
 else: 
     # obx = np.array([50])
     # oby = np.array([50])

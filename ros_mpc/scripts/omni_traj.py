@@ -20,9 +20,17 @@ from std_msgs.msg import Float64
 from geometry_msgs.msg import PoseStamped
 
 import ros_mpc.avoidance_tools as avoid_tools
-
+import gpiod 
 import mavros
 from mavros.base import SENSOR_QOS
+
+# this is very stupid but works for now 
+USE_LED = True
+if USE_LED:
+    LED_PIN = 3
+    chip = gpiod.Chip('../dev/gpiochip4')
+    led_line = chip.get_line(LED_PIN)
+    led_line.request(consumer="LED", type=gpiod.LINE_REQ_DIR_OUT)
 
 """
 - Set Effector Configurations
@@ -91,7 +99,6 @@ def to_avoid(current_position:np.ndarray, current_heading:float,
                                                         use_nearest_ref=use_nearest_ref, 
                                                         ref_point=ref_point)
  
-    print("driveby_position:", driveby_position)
  
     return True, driveby_position
 
@@ -130,7 +137,7 @@ class OmniTrajNode(Node):
         
         self.traj_pub = self.create_publisher(
             CtlTraj, 
-            'directional_trajectory', 
+            'omni_trajectory', 
             self.pub_freq)
         
         if sub_to_mavros:
@@ -395,19 +402,19 @@ def main(args=None) -> None:
             threshold = min_radius/2.0
             dot_product_threshold = 0.6
             
-        # avoid, driveby_position = to_avoid(
-        #     current_position=curr_pos,
-        #     current_heading=traj_node.state_info[5],
-        #     obstacles=obstacles,
-        #     r_threshold=min_radius,
-        #     dot_product_threshold=dot_product_threshold ,
-        #     K=10,
-        #     distance_buffer_m=threshold,
-        #     use_nearest_ref=True,
-        #     ref_point=goal_ref[:2])
-        # end_time = time.time()
+        avoid, driveby_position = to_avoid(
+            current_position=curr_pos,
+            current_heading=traj_node.state_info[5],
+            obstacles=obstacles,
+            r_threshold=min_radius,
+            dot_product_threshold=dot_product_threshold ,
+            K=10,
+            distance_buffer_m=threshold,
+            use_nearest_ref=True,
+            ref_point=goal_ref[:2])
+        end_time = time.time()
   
-        if False:
+        if avoid:
             print("Avoiding Obstacle")
             #TODO: might need to put this somewhere else and make it faster? 
             # profile performance of code and write in C++ if needed/Cython
@@ -454,7 +461,6 @@ def main(args=None) -> None:
                     solution_results['phi'][idx_buffer], 
                     solution_results['theta'][idx_buffer], 
                     np.deg2rad(-270),
-                    #solution_results['psi'][idx_buffer], 
                     solution_results['v_cmd'][idx_buffer]]
         
             solution_results,end_time = plane_mpc.get_solution(traj_node.state_info, 
@@ -467,11 +473,15 @@ def main(args=None) -> None:
         traj_node.publish_time(end_time - start_time)
         if counter % print_every == 0:
             print('Distance Error: ', distance_error)
+
+        if distance_error <= 40:
+            led_line.set_value(1)
     
         if distance_error <= distance_tolerance:
             traj_node.get_logger().info('Goal Reached Shutting Down Node') 
             goal_ref = DONE_STATE
-            print("Mission Complete")
+            led_line.set_value(0)
+            led_line.release()
             # traj_node.destroy_node()
             # rclpy.shutdown()
             # return    

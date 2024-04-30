@@ -179,8 +179,8 @@ class OptimalControlProblem():
         solver_opts = {
             'ipopt': {
                 'max_iter': 150,
-                # 'max_cpu_time': 0.15,
-                # 'max_wall_time': 0.15,
+                'max_cpu_time': 0.15,
+                'max_wall_time': 0.15,
                 'print_level': 0,
                 'warm_start_init_point': 'yes', #use the previous solution as initial guess
                 # 'acceptable_tol': 1e-2,
@@ -200,37 +200,4 @@ class OptimalControlProblem():
         self.solver = ca.nlpsol('solver', 'ipopt', 
             nlp_prob, solver_opts)
         print('Solver initialized')
-            
-    # def solve(self, x0:np.ndarray, xF:np.ndarray, u0:np.ndarray) -> dict:
-    #     """
-    #     solve the optimal control problem
-    #     Woudl be nice to wrap this into a solver
-    #     """
-        
-    #     state_init = ca.DM(x0)
-    #     state_final = ca.DM(xF)
-        
-    #     X0 = ca.repmat(state_init, 1, self.N + 1)
-    #     U0 = ca.repmat(u0, 1, self.N)
 
-            
-    #     args['p'] = ca.vertcat(
-    #         state_init,    # current state
-    #         state_final   # target state
-    #     )
-        
-    #     args['x0'] = ca.vertcat(
-    #         ca.reshape(X0, n_states*(self.N+1), 1),
-    #         ca.reshape(U0, n_controls*self.N, 1)
-    #     )
-
-    #     sol = self.solver(
-    #         x0=args['x0'],
-    #         lbx=args['lbx'],
-    #         ubx=args['ubx'],
-    #         lbg=args['lbg'],
-    #         ubg=args['ubg'],
-    #         p=args['p']
-    #     )
-        
-    #     return sol

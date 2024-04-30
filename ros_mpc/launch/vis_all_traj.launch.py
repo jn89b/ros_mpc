@@ -200,7 +200,7 @@ def generate_launch_description() -> LaunchDescription:
     #ld.add_action(avoid_traj_launch)
     #ld.add_action(waypoint_traj_launch)
     ld.add_action(directional_traj_launch)
-    # ld.add_action(omni_traj_launch)
+    ld.add_action(omni_traj_launch)
     
     # actual frame visualizers
     ld.add_action(actual_fix_wing_broadcaster)
