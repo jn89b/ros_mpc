@@ -20,7 +20,7 @@ from std_msgs.msg import Float64
 from geometry_msgs.msg import PoseStamped
 
 import ros_mpc.avoidance_tools as avoid_tools
-import gpiod 
+#import gpiod 
 import mavros
 from mavros.base import SENSOR_QOS
 
