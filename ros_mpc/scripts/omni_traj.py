@@ -410,7 +410,7 @@ def main(args=None) -> None:
             dot_product_threshold=dot_product_threshold ,
             K=10,
             distance_buffer_m=threshold,
-            use_nearest_ref=True,
+            use_nearest_ref=False,
             ref_point=goal_ref[:2])
         end_time = time.time()
   

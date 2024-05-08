@@ -76,10 +76,10 @@ elif USE_WALL:
     obz = np.random.randint(GOAL_STATE[2], GOAL_STATE[2]+1, len(obx))
     radii = np.random.randint(OBX_MIN_RADIUS, OBX_MIN_RADIUS+1, len(obx))
 elif USE_DESIRED_OBSTACLES:
-    obx = np.array([30])
-    oby = np.array([-75])
+    obx = np.array([-50])
+    oby = np.array([0])
     obz = np.array([75])
-    radii = np.array([30])
+    radii = np.array([40])
 elif USE_RANDOM:
     obx = np.random.randint(OBX_MIN_RANGE, OBX_MAX_RANGE, N_OBSTACLES)
     oby = np.random.randint(OBX_MIN_RANGE, OBX_MAX_RANGE, N_OBSTACLES)
