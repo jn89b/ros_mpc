@@ -7,22 +7,22 @@ Future work is to put this in a yaml file and load it for easy access
 """
 
 RADIUS_TARGET = 1.0
-N_OBSTACLES_NEAR_GOAL = 5
-N_OBSTACLES = 0
-OBX_MIN_RANGE = -50
+N_OBSTACLES_NEAR_GOAL = 8
+N_OBSTACLES = 8
+OBX_MIN_RANGE = -150
 OBX_MAX_RANGE = 100
 OBX_MIN_RADIUS = 3
-OBX_MAX_RADIUS = 5
+OBX_MAX_RADIUS = 10
 SEED_NUMBER = 0
 USE_OBSTACLES_NEAR_GOAL = False
 USE_DESIRED_OBSTACLES = False
 USE_WALL = False
-USE_RANDOM = False
+USE_RANDOM = True
 
 #TODO: This is dumb but will work for now, should have a better way to do this
 # probably make a service to update the new goal state 
 GOAL_STATE = [
-    175.0, #x 
+    175.0, #x   
     -100.0, #y 
     50.0,  #z 
     0.0,   #phi 
