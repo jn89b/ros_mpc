@@ -25,12 +25,12 @@ import mavros
 from mavros.base import SENSOR_QOS
 
 # this is very stupid but works for now 
-USE_LED = True
-if USE_LED:
-    LED_PIN = 3
-    chip = gpiod.Chip('../dev/gpiochip4')
-    led_line = chip.get_line(LED_PIN)
-    led_line.request(consumer="LED", type=gpiod.LINE_REQ_DIR_OUT)
+# USE_LED = True
+# if USE_LED:
+#     LED_PIN = 3
+#     chip = gpiod.Chip('../dev/gpiochip4')
+#     led_line = chip.get_line(LED_PIN)
+#     led_line.request(consumer="LED", type=gpiod.LINE_REQ_DIR_OUT)
 
 """
 - Set Effector Configurations
@@ -377,8 +377,8 @@ def main(args=None) -> None:
     goal_ref = GOAL_STATE
     JUST_AVOIDED = False
     
-    CRASH = False
-    
+    wp_counter = 0
+        
     while rclpy.ok():
         rclpy.spin_once(traj_node)
 
@@ -474,17 +474,24 @@ def main(args=None) -> None:
         if counter % print_every == 0:
             print('Distance Error: ', distance_error)
 
-        if distance_error <= 40:
-            led_line.set_value(1)
+        # if distance_error <= 40:
+        #     led_line.set_value(1)
     
         if distance_error <= distance_tolerance:
-            traj_node.get_logger().info('Goal Reached Shutting Down Node') 
+            traj_node.get_logger().info('Goal Reached ') 
             goal_ref = DONE_STATE
-            led_line.set_value(0)
-            led_line.release()
+            wp_counter += 1
+            # led_line.set_value(0)
+            # led_line.release()
             # traj_node.destroy_node()
             # rclpy.shutdown()
-            # return    
+            # return
+        
+        if wp_counter == 2:
+            traj_node.get_logger().info('Final Goal Reached shutting down node')
+            traj_node.destroy_node()
+            rclpy.shutdown()
+            return 
         
         traj_node.publish_trajectory(solution_results, idx_step)
         counter += 1

@@ -9,21 +9,21 @@ Future work is to put this in a yaml file and load it for easy access
 RADIUS_TARGET = 1.0
 N_OBSTACLES_NEAR_GOAL = 5
 N_OBSTACLES = 0
-OBX_MIN_RANGE = -150
-OBX_MAX_RANGE = 150
+OBX_MIN_RANGE = -100
+OBX_MAX_RANGE = 125
 OBX_MIN_RADIUS = 3
-OBX_MAX_RADIUS = 10
+OBX_MAX_RADIUS = 5
 SEED_NUMBER = 0
 USE_OBSTACLES_NEAR_GOAL = False
-USE_DESIRED_OBSTACLES = True
+USE_DESIRED_OBSTACLES = False
 USE_WALL = False
 USE_RANDOM = False
 
 #TODO: This is dumb but will work for now, should have a better way to do this
 # probably make a service to update the new goal state 
 GOAL_STATE = [
-    200.0, #x 
-    200.0, #y 
+    175.0, #x 
+    -100.0, #y 
     50.0,  #z 
     0.0,   #phi 
     0.0,   #theta
@@ -32,9 +32,9 @@ GOAL_STATE = [
 ]
 
 DONE_STATE = [
-    0.0, #x 
-    0.0, #y 
-    20.0,  #z 
+    -150.0, #x 
+    -150.0, #y 
+    40.0,  #z 
     0.0,   #phi 
     0.0,   #theta
     0.0,   #psi 
