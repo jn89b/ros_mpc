@@ -9,8 +9,8 @@ Future work is to put this in a yaml file and load it for easy access
 RADIUS_TARGET = 1.0
 N_OBSTACLES_NEAR_GOAL = 5
 N_OBSTACLES = 0
-OBX_MIN_RANGE = -100
-OBX_MAX_RANGE = 125
+OBX_MIN_RANGE = -50
+OBX_MAX_RANGE = 100
 OBX_MIN_RADIUS = 3
 OBX_MAX_RADIUS = 5
 SEED_NUMBER = 0
