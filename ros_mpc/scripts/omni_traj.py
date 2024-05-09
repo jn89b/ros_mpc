@@ -349,7 +349,7 @@ def main(args=None) -> None:
     goal = GOAL_STATE
     idx_buffer = 2
     
-    distance_tolerance = 10.0
+    distance_tolerance = 12.5
     
     solution_results,end_time = plane_mpc.get_solution(traj_node.state_info, 
                                                         goal, traj_node.control_info,

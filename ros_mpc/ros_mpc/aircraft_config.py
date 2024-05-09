@@ -8,13 +8,13 @@ Future work is to put this in a yaml file and load it for easy access
 
 RADIUS_TARGET = 1.0
 N_OBSTACLES_NEAR_GOAL = 8
-N_OBSTACLES = 6
-OBX_MIN_RANGE = -125
-OBX_MAX_RANGE = 75
-OBY_MIN_RANGE = -25
-OBY_MAX_RANGE = 100
+N_OBSTACLES = 5
+OBX_MIN_RANGE = 50
+OBX_MAX_RANGE = 125
+OBY_MIN_RANGE = -100
+OBY_MAX_RANGE = -30
 OBX_MIN_RADIUS = 3
-OBX_MAX_RADIUS = 8
+OBX_MAX_RADIUS = 6
 SEED_NUMBER = 2
 USE_OBSTACLES_NEAR_GOAL = False
 USE_DESIRED_OBSTACLES = False
@@ -24,23 +24,23 @@ USE_RANDOM = True
 #TODO: This is dumb but will work for now, should have a better way to do this
 # probably make a service to update the new goal state 
 GOAL_STATE = [
-    -50.0, #x   
-    150.0, #y 
+    175.0, #x   
+    -150.0, #y 
     50.0,  #z 
     0.0,   #phi 
     0.0,   #theta
     0.0,   #psi 
-    20.0,  #airspeed
+    12.0,  #airspeed
 ]
 
 DONE_STATE = [
-    -50.0, #x 
-    -150.0, #y 
+    0.0, #x 
+    0.0, #y 
     40.0,  #z 
     0.0,   #phi 
     0.0,   #theta
     0.0,   #psi 
-    20.0,  #airspeed
+    12.0,  #airspeed
 ]
 
 # This is dumb but will work for now, should have a better way to do this
@@ -82,7 +82,7 @@ elif USE_DESIRED_OBSTACLES:
     radii = np.array([40])
 elif USE_RANDOM:
     obx = np.random.randint(OBX_MIN_RANGE, OBX_MAX_RANGE, N_OBSTACLES)
-    oby = np.random.randint(OBX_MIN_RANGE, OBX_MAX_RANGE, N_OBSTACLES)
+    oby = np.random.randint(OBY_MIN_RANGE, OBY_MAX_RANGE, N_OBSTACLES)
     obz = np.random.randint(0, 80, N_OBSTACLES)
     radii = np.random.randint(OBX_MIN_RADIUS, OBX_MAX_RADIUS, N_OBSTACLES)
 else: 
@@ -103,8 +103,8 @@ control_constraints = {
     'u_theta_max': np.deg2rad(10),
     'u_psi_min':  -np.deg2rad(45),
     'u_psi_max':   np.deg2rad(45),
-    'v_cmd_min':   15,
-    'v_cmd_max':   25
+    'v_cmd_min':   10,
+    'v_cmd_max':   15
 }
 
 state_constraints = {
@@ -116,10 +116,10 @@ state_constraints = {
     'z_max': 65,
     'phi_min':  -np.deg2rad(50),
     'phi_max':   np.deg2rad(50),
-    'theta_min':-np.deg2rad(10),
-    'theta_max': np.deg2rad(10),
-    'airspeed_min': 15,
-    'airspeed_max': 30,
+    'theta_min':-np.deg2rad(25),
+    'theta_max': np.deg2rad(25),
+    'airspeed_min': 10,
+    'airspeed_max': 15,
     'psi_min':  -np.deg2rad(np.inf),
     'psi_max':   np.deg2rad(np.inf),
 }
@@ -163,7 +163,7 @@ omni_effector_config = {
         }
 
 mpc_params_load = {
-    'N': 30,
+    'N': 20,
     'Q': ca.diag([1E-2, 1E-2, 1E-2, 1E-2, 1E-2, 1E-2, 1E-2]),
     'R': ca.diag([0.1, 0.1, 0.1, 0.0]),
     'dt': 0.1
@@ -176,8 +176,8 @@ control_constraints_load = {
     'load_z_max':  6,
     'load_x_min':  -2, #left 
     'load_x_max':   2, #right
-    'v_cmd_min':   15,
-    'v_cmd_max':   30
+    'v_cmd_min':   10.0,
+    'v_cmd_max':   15.0
 }
 
 state_constraints_load = {
@@ -193,6 +193,6 @@ state_constraints_load = {
     'theta_max': np.deg2rad(15),
     # 'psi_min':  -np.deg2rad(180),
     # 'psi_max':   np.deg2rad(180),
-    'airspeed_min': 15,
-    'airspeed_max': 30
+    'v_cmd_min':   10.0,
+    'v_cmd_max':   15.0
 }
