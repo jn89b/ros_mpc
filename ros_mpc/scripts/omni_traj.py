@@ -3,7 +3,7 @@
 import casadi as ca
 import rclpy
 import numpy as np
-import time 
+import time
 
 from drone_interfaces.msg import Telem, CtlTraj
 from rclpy.node import Node
@@ -20,11 +20,11 @@ from std_msgs.msg import Float64
 from geometry_msgs.msg import PoseStamped
 
 import ros_mpc.avoidance_tools as avoid_tools
-#import gpiod 
+# import gpiod
 import mavros
 from mavros.base import SENSOR_QOS
 
-# this is very stupid but works for now 
+# this is very stupid but works for now
 # USE_LED = True
 # if USE_LED:
 #     LED_PIN = 3
@@ -41,123 +41,125 @@ from mavros.base import SENSOR_QOS
 
 """
 
-def to_avoid(current_position:np.ndarray, current_heading:float,
-             obstacles:np.ndarray, r_threshold:float, 
-             K:int=5, 
-             dot_product_threshold:float=0.5, 
-             distance_buffer_m:float=10, 
-             use_nearest_ref:bool=True,
-             ref_point:np.ndarray=None) -> tuple:
-    
-    nearest_obstacles,nearest_indices  = avoid_tools.knn_obstacles(
+
+def to_avoid(current_position: np.ndarray, current_heading: float,
+             obstacles: np.ndarray, r_threshold: float,
+             K: int = 5,
+             dot_product_threshold: float = 0.5,
+             distance_buffer_m: float = 10,
+             use_nearest_ref: bool = True,
+             ref_point: np.ndarray = None) -> tuple:
+
+    nearest_obstacles, nearest_indices = avoid_tools.knn_obstacles(
         obstacles, current_position, K=K, use_2d=True)
 
-    #check if list is empty
+    # check if list is empty
     if len(nearest_obstacles) == 0:
         return False, None
-    
-    ego_unit_vector = np.array([np.cos(current_heading), np.sin(current_heading)])
+
+    ego_unit_vector = np.array(
+        [np.cos(current_heading), np.sin(current_heading)])
 
     inline_obs, dot_products = avoid_tools.find_inline_obstacles(
-        ego_unit_vector, 
-        nearest_obstacles, current_position, 
+        ego_unit_vector,
+        nearest_obstacles, current_position,
         dot_product_threshold=dot_product_threshold,
         use_2d=True)
- 
+
     if len(inline_obs) == 0:
         return False, None
- 
-    danger_zones,dot_product = avoid_tools.find_danger_zones(
-        inline_obs, current_position, r_threshold, dot_products, 
+
+    danger_zones, dot_product = avoid_tools.find_danger_zones(
+        inline_obs, current_position, r_threshold, dot_products,
         distance_buffer=distance_buffer_m, use_2d=True)
-    
-    # print("danger_zones:", danger_zones)	
- 
+
+    # print("danger_zones:", danger_zones)
+
     if len(danger_zones) == 0:
         return False, None
- 
+
     # dot_product = [d[1] for d in danger_zones]
     # danger_zones = [d[0] for d in danger_zones]
-    radius_obs = [d[-1] for d in danger_zones]    
-    
+    radius_obs = [d[-1] for d in danger_zones]
+
     max_dot_obs = np.argmax(dot_product)
-    #get max radius of obstacle
+    # get max radius of obstacle
     max_radius = max(radius_obs)
-    
+
     # if max_dot_obs < dot_product_threshold:
     #     return False, None
     max_dot_obs = danger_zones[max_dot_obs]
-    robot_radius = obs_avoid_params['safe_distance'] + max_radius + distance_buffer_m
+    robot_radius = obs_avoid_params['safe_distance'] + \
+        max_radius + distance_buffer_m
     driveby_position = avoid_tools.find_driveby_direction(
-                                                        goal_position=max_dot_obs[:2], 
-                                                        current_position=current_position[:2], 
-                                                        heading_rad=current_heading,
-                                                        obs_radius=max_radius, 
-                                                        robot_radius=robot_radius, 
-                                                        consider_obstacles=True, \
-                                                        danger_zones=inline_obs,
-                                                        use_nearest_ref=use_nearest_ref, 
-                                                        ref_point=ref_point)
- 
- 
+        goal_position=max_dot_obs[:2],
+        current_position=current_position[:2],
+        heading_rad=current_heading,
+        obs_radius=max_radius,
+        robot_radius=robot_radius,
+        consider_obstacles=True,
+        danger_zones=inline_obs,
+        use_nearest_ref=use_nearest_ref,
+        ref_point=ref_point)
+
     return True, driveby_position
 
+
 class OmniTrajNode(Node):
-    def __init__(self, 
-                 pub_freq:int=100, 
-                 sub_freq:int=100,
-                 save_states:bool=False,
-                 sub_to_mavros:bool=True):
+    def __init__(self,
+                 pub_freq: int = 100,
+                 sub_freq: int = 100,
+                 save_states: bool = False,
+                 sub_to_mavros: bool = True):
         super().__init__('omni_traj_fw_publisher')
         self.get_logger().info('Starting Omni Traj FW Publisher')
-        
+
         self.pub_freq = pub_freq
         self.sub_freq = sub_freq
-        
-        #flag this to save states and cache it for later if needed
+
+        # flag this to save states and cache it for later if needed
         self.save_states = save_states
-        
-        self.state_info =[
-            None, #x
-            None, #y
-            None, #z
-            None, #phi
-            None, #theta
-            None, #psi
-            None, #airspeed
-        ]
-        
-        self.control_info = [
-            None, #u_phi
-            None, #u_theta
-            None, #u_psi
-            None  #v_cmd
+
+        self.state_info = [
+            None,  # x
+            None,  # y
+            None,  # z
+            None,  # phi
+            None,  # theta
+            None,  # psi
+            None,  # airspeed
         ]
 
-        
+        self.control_info = [
+            None,  # u_phi
+            None,  # u_theta
+            None,  # u_psi
+            None  # v_cmd
+        ]
+
         self.traj_pub = self.create_publisher(
-            CtlTraj, 
-            'omni_trajectory', 
+            CtlTraj,
+            'trajectory',
             self.pub_freq)
-        
+
         if sub_to_mavros:
             self.state_sub = self.create_subscription(mavros.local_position.Odometry,
-                                                    'mavros/local_position/odom', 
-                                                    self.mavros_state_callback, 
-                                                    qos_profile=SENSOR_QOS)
-        else:        
-            self.state_sub = self.create_subscription(Telem, 
-                'telem', 
-                self.state_callback, 
-                self.sub_freq)
-
+                                                      'mavros/local_position/odom',
+                                                      self.mavros_state_callback,
+                                                      qos_profile=SENSOR_QOS)
+        else:
+            self.state_sub = self.create_subscription(Telem,
+                                                      'telem',
+                                                      self.state_callback,
+                                                      self.sub_freq)
 
         self.cost_pub = self.create_publisher(Float64, 'waypoint_cost_val', 50)
-        self.time_sol_pub = self.create_publisher(Float64, 'waypoint_time_sol', 50)
-        self.driveby_pos_pub = self.create_publisher(PoseStamped, 
+        self.time_sol_pub = self.create_publisher(
+            Float64, 'waypoint_time_sol', 50)
+        self.driveby_pos_pub = self.create_publisher(PoseStamped,
                                                      'driveby_position', 50)
 
-    def publish_driveby_position(self, driveby_position:np.ndarray) -> None:
+    def publish_driveby_position(self, driveby_position: np.ndarray) -> None:
         driveby_msg = PoseStamped()
         driveby_msg.pose.position.x = driveby_position[0]
         driveby_msg.pose.position.y = driveby_position[1]
@@ -175,8 +177,8 @@ class OmniTrajNode(Node):
         self.u_theta_history = []
         self.u_psi_history = []
         self.v_cmd_history = []
-        
-    def mavros_state_callback(self, msg:mavros.local_position.Odometry) -> None:
+
+    def mavros_state_callback(self, msg: mavros.local_position.Odometry) -> None:
         """
         Converts NED to ENU and publishes the trajectory
           """
@@ -199,14 +201,14 @@ class OmniTrajNode(Node):
         vx = msg.twist.twist.linear.x
         vy = msg.twist.twist.linear.y
         vz = msg.twist.twist.linear.z
-        #get magnitude of velocity
+        # get magnitude of velocity
         self.state_info[6] = np.sqrt(vx**2 + vy**2 + vz**2)
-        #self.state_info[6] = #msg.twist.twist.linear.x
+        # self.state_info[6] = #msg.twist.twist.linear.x
         self.control_info[0] = msg.twist.twist.angular.x
         self.control_info[1] = msg.twist.twist.angular.y
         self.control_info[2] = msg.twist.twist.angular.z
         self.control_info[3] = msg.twist.twist.linear.x
-    
+
         if self.save_states:
             self.x_history.append(self.state_info[0])
             self.y_history.append(self.state_info[1])
@@ -219,9 +221,8 @@ class OmniTrajNode(Node):
             self.u_psi_history.append(self.control_info[2])
             self.v_cmd_history.append(self.control_info[3])
 
+    def state_callback(self, msg: Telem) -> None:
 
-    def state_callback(self, msg:Telem) -> None:
-        
         enu_coords = rot_utils.convertNEDToENU(
             msg.x, msg.y, msg.z)
         # positions
@@ -229,37 +230,39 @@ class OmniTrajNode(Node):
         self.state_info[1] = enu_coords[1]
         self.state_info[2] = enu_coords[2]
 
-        #wrap yaw to 0-360
+        # wrap yaw to 0-360
         self.state_info[3] = msg.roll
         self.state_info[4] = msg.pitch
-        self.state_info[5] = msg.yaw #flip the yaw to match ENU frame
+        self.state_info[5] = msg.yaw  # flip the yaw to match ENU frame
         self.state_info[6] = np.sqrt(msg.vx**2 + msg.vy**2 + msg.vz**2)
 
-        #rotate roll and pitch rates to ENU frame   
+        # rotate roll and pitch rates to ENU frame
         self.control_info[0] = msg.roll_rate
         self.control_info[1] = msg.pitch_rate
         self.control_info[2] = msg.yaw_rate
-        self.control_info[3] = np.sqrt(msg.vx**2 + msg.vy**2 + msg.vz**2) 
+        self.control_info[3] = np.sqrt(msg.vx**2 + msg.vy**2 + msg.vz**2)
 
-    def publish_trajectory(self, solution_results:dict, idx_step:int) -> None:
+    def publish_trajectory(self, solution_results: dict, idx_step: int) -> None:
         x = solution_results['x']
         y = solution_results['y']
         z = solution_results['z']
         phi = solution_results['phi']
-        theta = -solution_results['theta']#have to flip sign to match NED to ENU
+        # have to flip sign to match NED to ENU
+        theta = -solution_results['theta']
         psi = solution_results['psi']
-        
+
         u_phi = solution_results['u_phi']
-        u_theta = -solution_results['u_theta']#have to flip sign to match NED to ENU
+        # have to flip sign to match NED to ENU
+        u_theta = -solution_results['u_theta']
         u_psi = solution_results['u_psi']
         v_cmd = solution_results['v_cmd']
-        
+
         x_ned = y
         y_ned = x
         z_ned = -z
-        
+
         traj_msg = CtlTraj()
-        #make sure its a list
+        # make sure its a list
         traj_msg.x = x_ned.tolist()
         traj_msg.y = y_ned.tolist()
         traj_msg.z = z_ned.tolist()
@@ -272,52 +275,52 @@ class OmniTrajNode(Node):
         traj_msg.vx = v_cmd.tolist()
 
         traj_msg.idx = idx_step
-                
+
         self.traj_pub.publish(traj_msg)
 
         if 'cost' in solution_results:
-                cost_val = solution_results['cost']
-                self.publish_cost(float(cost_val))
+            cost_val = solution_results['cost']
+            self.publish_cost(float(cost_val))
 
-
-    def get_time_idx(self, mpc_params:dict, 
-                     solution_time:float, idx_buffer:int=0) -> int:
+    def get_time_idx(self, mpc_params: dict,
+                     solution_time: float, idx_buffer: int = 0) -> int:
         time_rounded = round(solution_time, 1)
-        
+
         if time_rounded <= 1:
             time_rounded = 1
-        
+
         ctrl_idx = mpc_params['dt']/time_rounded
         idx = int(round(ctrl_idx)) + idx_buffer
-        
+
         return idx
 
-    def publish_cost(self, cost:float) -> None:
+    def publish_cost(self, cost: float) -> None:
         cost_msg = Float64()
         cost_msg.data = cost
         self.cost_pub.publish(cost_msg)
-  
-    def publish_time(self, time_sol:float) -> None:
+
+    def publish_time(self, time_sol: float) -> None:
         time_msg = Float64()
         time_msg.data = time_sol
         self.time_sol_pub.publish(time_msg)
 
+
 def main(args=None) -> None:
-    rclpy.init(args=args)    
+    rclpy.init(args=args)
 
     traj_node = OmniTrajNode()
     rclpy.spin_once(traj_node)
     plane = Plane()
- 
+
     Q_val = 1E-2
     R_val = 1E-2
     omni_mpc_params = {
-		'N': 15,
+        'N': 15,
         'Q': ca.diag([0.1, 0.1, 0.1, 0.0, 0.0, 0.0, Q_val]),
-        'R': ca.diag([R_val, R_val, R_val, 0.1]),
-		'dt': 0.1
-	}
-    
+        'R': ca.diag([0.1, R_val, R_val, 0.1]),
+        'dt': 0.1
+    }
+
     plane_mpc = PlaneOptControl(
         control_constraints=control_constraints,
         state_constraints=state_constraints,
@@ -330,9 +333,9 @@ def main(args=None) -> None:
     )
     plane_mpc.init_optimization_problem()
 
-    #TODO: this is a hack, using another mpc formulation in case we're close to obstacles 
+    # TODO: this is a hack, using another mpc formulation in case we're close to obstacles
     # and need to avoid them resend a new trajectory in case we're close to obstacles
- 
+
     avoid_mpc = PlaneOptControl(
         control_constraints=control_constraints,
         state_constraints=state_constraints,
@@ -343,15 +346,15 @@ def main(args=None) -> None:
     )
     avoid_mpc.init_optimization_problem()
 
-    counter = 1  
+    counter = 1
     print_every = 10
 
     goal = GOAL_STATE
     idx_buffer = 2
-    
-    distance_tolerance = 12.5
-    
-    solution_results,end_time = plane_mpc.get_solution(traj_node.state_info, 
+
+    distance_tolerance = 5.0
+
+    solution_results, end_time = plane_mpc.get_solution(traj_node.state_info,
                                                         goal, traj_node.control_info,
                                                         get_cost=True)
 
@@ -364,36 +367,36 @@ def main(args=None) -> None:
     obs_y = np.append(obs_y, GOAL_STATE[1])
     obs_z = np.append(obs_z, GOAL_STATE[2])
     obs_radii = np.append(obs_radii, RADIUS_TARGET)
-        
-    obstacles = np.array([obs_x, obs_y, obs_z, obs_radii]).T    
+
+    obstacles = np.array([obs_x, obs_y, obs_z, obs_radii]).T
     min_velocity = state_constraints['airspeed_min'] + 1
     max_velocity = state_constraints['airspeed_max']
     max_phi = control_constraints['u_phi_max']
     max_psi = control_constraints['u_psi_max']
-    
+
     min_radius = min_velocity**2 / (9.81*np.tan(max_phi))
- 
+
     MISSION_COMPLETE = False
     goal_ref = GOAL_STATE
     JUST_AVOIDED = False
-    
+
     wp_counter = 0
-        
+
     while rclpy.ok():
         rclpy.spin_once(traj_node)
 
         start_time = time.time()
 
         distance_error = np.sqrt(
-            (goal_ref[0] - traj_node.state_info[0])**2 + 
-            (goal_ref[1] - traj_node.state_info[1])**2 
-        )      
-        
-        #curr_pos = np.array([traj_node.state_info[0], traj_node.state_info[1]])
-        curr_pos = np.array([solution_results['x'][idx_buffer], 
-                             solution_results['y'][idx_buffer]], 
-                             solution_results['z'][idx_buffer])
-        
+            (goal_ref[0] - traj_node.state_info[0])**2 +
+            (goal_ref[1] - traj_node.state_info[1])**2
+        )
+
+        # curr_pos = np.array([traj_node.state_info[0], traj_node.state_info[1]])
+        curr_pos = np.array([solution_results['x'][idx_buffer],
+                             solution_results['y'][idx_buffer]],
+                            solution_results['z'][idx_buffer])
+
         start_time = time.time()
         if distance_error <= omni_effector_config['effector_range']:
             threshold = min_radius/1.5
@@ -401,84 +404,84 @@ def main(args=None) -> None:
         else:
             threshold = min_radius/2.0
             dot_product_threshold = 0.6
-            
+
         avoid, driveby_position = to_avoid(
             current_position=curr_pos,
             current_heading=traj_node.state_info[5],
             obstacles=obstacles,
             r_threshold=min_radius,
-            dot_product_threshold=dot_product_threshold ,
+            dot_product_threshold=dot_product_threshold,
             K=10,
             distance_buffer_m=threshold,
             use_nearest_ref=False,
             ref_point=goal_ref[:2])
         end_time = time.time()
-  
+        # avoid = False
         if avoid:
             print("Avoiding Obstacle")
-            #TODO: might need to put this somewhere else and make it faster? 
+            # TODO: might need to put this somewhere else and make it faster?
             # profile performance of code and write in C++ if needed/Cython
             # print("avoid:", driveby_position, "time:", end_time-start_time)
-            #compute phi desired
-            #take cross product of the current heading and the driveby position
-            ego_unit_vector = np.array([np.cos(traj_node.state_info[5]), 
+            # compute phi desired
+            # take cross product of the current heading and the driveby position
+            ego_unit_vector = np.array([np.cos(traj_node.state_info[5]),
                                         np.sin(traj_node.state_info[5])])
             los_to_driveby = curr_pos - driveby_position
             los_unit_driveby = los_to_driveby / np.linalg.norm(los_to_driveby)
             cross_product = np.cross(ego_unit_vector, los_unit_driveby)
-            
-            #abstract this to a method 
-            #if negative turn right
+
+            # abstract this to a method
+            # if negative turn right
             if cross_product < 0:
-                #phi_desired = -max_phi
+                # phi_desired = -max_phi
                 phi_multiplier = -1.0
             else:
-                #phi_desired = max_phi
+                # phi_desired = max_phi
                 phi_multiplier = 1.0
-                
+
             dlat = np.linalg.norm(driveby_position - curr_pos)
             dz = goal_ref[2] - traj_node.state_info[2]
             R = np.sqrt(dlat**2 + dz**2)
             phi = np.arctan(max_velocity**2 / (9.81*R))
             # phi_desired = phi * phi_multiplier
-            #phi_desired = max_phi * phi_multiplier
-            phi_desired = -9.81 * np.tan(phi) / max_velocity**2           
+            # phi_desired = max_phi * phi_multiplier
+            phi_desired = -9.81 * np.tan(phi) / max_velocity**2
             yaw_desired = max_psi * phi_multiplier
-            
+
             z_ref = traj_node.state_info[2]
             goal = [driveby_position[0], driveby_position[1], goal[2],
-                                phi_desired, 
-                                traj_node.state_info[4], 
-                                yaw_desired, 
-                                min_velocity]
+                    phi_desired,
+                    traj_node.state_info[4],
+                    yaw_desired,
+                    min_velocity]
             solution_results, end_time = avoid_mpc.get_solution(
                 traj_node.state_info, goal, traj_node.control_info, get_cost=True)
-            
+
             # JUST_AVOIDED = True
-            
+
         else:
-            goal = [goal_ref[0], goal_ref[1], goal_ref[2], 
-                    solution_results['phi'][idx_buffer], 
-                    solution_results['theta'][idx_buffer], 
+            goal = [goal_ref[0], goal_ref[1], goal_ref[2],
+                    solution_results['phi'][idx_buffer],
+                    solution_results['theta'][idx_buffer],
                     np.deg2rad(-270),
                     solution_results['v_cmd'][idx_buffer]]
-        
-            solution_results,end_time = plane_mpc.get_solution(traj_node.state_info, 
-                                                            goal, traj_node.control_info,
-                                                            get_cost=True)
+
+            solution_results, end_time = plane_mpc.get_solution(traj_node.state_info,
+                                                                goal, traj_node.control_info,
+                                                                get_cost=True)
             JUST_AVOIDED = False
-        
+
         # delta_time = time.time() - start_time
-        idx_step = traj_node.get_time_idx(mpc_params, end_time - start_time, idx_buffer)
+        idx_step = traj_node.get_time_idx(
+            mpc_params, end_time - start_time, idx_buffer)
         traj_node.publish_time(end_time - start_time)
         if counter % print_every == 0:
             print('Distance Error: ', distance_error)
 
         # if distance_error <= 40:
         #     led_line.set_value(1)
-    
         if distance_error <= distance_tolerance:
-            traj_node.get_logger().info('Goal Reached ') 
+            traj_node.get_logger().info('Goal Reached ')
             goal_ref = DONE_STATE
             wp_counter += 1
             # led_line.set_value(0)
@@ -486,15 +489,16 @@ def main(args=None) -> None:
             # traj_node.destroy_node()
             # rclpy.shutdown()
             # return
-        
+
         if wp_counter == 2:
             traj_node.get_logger().info('Final Goal Reached shutting down node')
             traj_node.destroy_node()
             rclpy.shutdown()
-            return 
-        
+            return
+
         traj_node.publish_trajectory(solution_results, idx_step)
         counter += 1
-  
-if __name__=='__main__':
+
+
+if __name__ == '__main__':
     main()
