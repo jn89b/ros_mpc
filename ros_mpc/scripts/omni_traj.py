@@ -110,7 +110,7 @@ class OmniTrajNode(Node):
                  pub_freq: int = 100,
                  sub_freq: int = 100,
                  save_states: bool = False,
-                 sub_to_mavros: bool = True):
+                 sub_to_mavros: bool = False):
         super().__init__('omni_traj_fw_publisher')
         self.get_logger().info('Starting Omni Traj FW Publisher')
 
