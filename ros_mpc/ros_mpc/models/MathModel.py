@@ -142,7 +142,7 @@ class PlaneKinematicModel(CasadiModel):
                  dt_val: float = 0.1,
                  tau_v: float = 0.15,
                  tau_phi: float = 0.1,
-                 tau_theta: float = 0.12,
+                 tau_theta: float = 0.05,
                  tau_psi: float = 0.15,
                  tau_p: float = 0.1,
                  tau_q: float = 0.1,
@@ -318,6 +318,9 @@ class PlaneKinematicModel(CasadiModel):
         # So a positive u_theta means we want the nose to be up
         self.theta_fdot: ca.SX = (
             -self.u_theta - self.theta_f) / self.tau_theta
+    
+        
+        # This is the yaw rate command 
         if make_z_positive_up:
             self.psi_fdot: ca.SX = self.g * (ca.tan(self.phi_f) / self.v_f)
         else:

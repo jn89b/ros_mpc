@@ -136,16 +136,16 @@ def generate_launch_description() -> LaunchDescription:
         )
     
     
-    actual_effector_broadcast_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            PathJoinSubstitution([
-                FindPackageShare('pew_pew'),
-                'launch',
-                'all_effector.launch.py'
-            ])
-        ),
-        # launch_arguments=directional_traj_config.items()
-    )
+    # actual_effector_broadcast_launch = IncludeLaunchDescription(
+    #     PythonLaunchDescriptionSource(
+    #         PathJoinSubstitution([
+    #             FindPackageShare('pew_pew'),
+    #             'launch',
+    #             'all_effector.launch.py'
+    #         ])
+    #     ),
+    #     # launch_arguments=directional_traj_config.items()
+    # )
         
     ### VISUALIZERS THAT ARE SCALED DOWN  ###     
     # this visualizes the scaled down frame of the fixed wing 
@@ -184,15 +184,15 @@ def generate_launch_description() -> LaunchDescription:
         output='screen',
     )
     
-    effector_scaled_broadcast_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            PathJoinSubstitution([
-                FindPackageShare('pew_pew'),
-                'launch',
-                'all_effector_scaled.launch.py'
-            ])
-        ),
-    )
+    # effector_scaled_broadcast_launch = IncludeLaunchDescription(
+    #     PythonLaunchDescriptionSource(
+    #         PathJoinSubstitution([
+    #             FindPackageShare('pew_pew'),
+    #             'launch',
+    #             'all_effector_scaled.launch.py'
+    #         ])
+    #     ),
+    # )
     
     # set the actual frame of the aicraft
     ld = LaunchDescription()
@@ -204,13 +204,13 @@ def generate_launch_description() -> LaunchDescription:
     
     # actual frame visualizers
     ld.add_action(actual_fix_wing_broadcaster)
-    ld.add_action(actual_effector_broadcast_launch)
+    # ld.add_action(actual_effector_broadcast_launch)
     
     # scaled down visualizers
     ld.add_action(scaled_fix_wing_node)
     ld.add_action(obs_viz_node)
     ld.add_action(goal_viz_node)
     
-    ld.add_action(effector_scaled_broadcast_launch)
+    # ld.add_action(effector_scaled_broadcast_launch)
     
     return ld
