@@ -128,14 +128,15 @@ class SourceOptControl(OptimalControlProblem):
             error_theta = ca.fabs(los_theta - pitch)
             error_phi = ca.fabs(ca.atan2(dy, dx) - roll)
 
-            ratio_distance = (dtarget/self.pew_pew_params['effector_range'])**2
-            ratio_theta = (error_theta/self.pew_pew_params['effector_angle'])**2
-            ratio_phi = (error_phi/self.pew_pew_params['effector_angle'])**2
-            ratio_psi = (error_psi/self.pew_pew_params['effector_angle'])**2
+            # ratio_distance = (dtarget/self.pew_pew_params['effector_range'])**2
+            # ratio_theta = (error_theta/self.pew_pew_params['effector_angle'])**2
+            # ratio_phi = (error_phi/self.pew_pew_params['effector_angle'])**2
+            # ratio_psi = (error_psi/self.pew_pew_params['effector_angle'])**2
 
-            # mounting on the sides of the vehicle
-            effector_dmg = (ratio_distance + (ratio_theta +
-                            (0*abs_dot_product) + ratio_psi + ratio_phi))
+            # # mounting on the sides of the vehicle
+            # # effector_dmg = (ratio_distance + (ratio_theta +
+            # #                 (0*abs_dot_product) + ratio_psi + ratio_phi))
+            effector_dmg = dtarget + abs_dot_product 
             # this is time on target
             # this velocity penalty will be used to slow down the vehicle as it gets closer to the target
             quad_v_max = (v_cmd - v_max)**2
@@ -144,7 +145,9 @@ class SourceOptControl(OptimalControlProblem):
             vel_penalty = ca.if_else(error_dist_factor <= 0.005,
                                      quad_v_max, quad_v_min)
 
-            effector_cost += effector_dmg + vel_penalty  # + controls_cost
+            #all other controls except for the velocity
+            controls_cost = ca.sumsqr(self.U[:3, i]) * 0.2
+            effector_cost += effector_dmg  + controls_cost
 
             # constraint to make sure we don't get too close to the target and crash into it
             safe_distance = self.obs_params['safe_distance']
@@ -184,7 +187,7 @@ class SourceOptControl(OptimalControlProblem):
         """
         dynamics_cost = self.compute_dynamics_cost()
         omni_cost = self.compute_omni_cost()
-        total_cost = dynamics_cost + omni_cost
+        total_cost = omni_cost
         return total_cost
 
     def solve(self, x0: np.ndarray, xF: np.ndarray, u0: np.ndarray) -> np.ndarray:
@@ -220,10 +223,6 @@ class SourceOptControl(OptimalControlProblem):
             # Concatenate state constraints and obstacle constraints (state constraints come first)
             lbg = ca.vertcat(lbg_states, lbg_obs)
             ubg = ca.vertcat(ubg_states, ubg_obs)  # Same for the upper bounds
-        # else:
-        #     num_constraints = n_states*(self.N+1)
-        #     lbg = ca.DM.zeros((num_constraints, 1))
-        #     ubg = ca.DM.zeros((num_constraints, 1))
         else:
             # we will use the target location as a constraint 
             target_constraints = 1 

@@ -16,8 +16,6 @@ from ros_mpc.models.MathModel import PlaneKinematicModel
 from mavros.base import SENSOR_QOS
 
 from ros_mpc.rotation_utils import (ned_to_enu_states,
-                                    yaw_enu_to_ned,
-                                    enu_to_ned_states,
                                     euler_from_quaternion,
                                     convert_enu_state_sol_to_ned)
 
@@ -62,7 +60,7 @@ class OmniTraj(Node):
                                                   self.mavros_state_callback,
                                                   qos_profile=SENSOR_QOS)
         self.pub_traj = self.create_publisher(
-            CtlTraj, 'directional_trajectory', 10)
+            CtlTraj, 'trajectory', 10)
 
         self.num_controls: int = 4
         self.current_enu_controls: np.array = np.array(
@@ -245,20 +243,20 @@ def main(args=None):
 
     # now we will set the MPC weights for the plane
     # 0 means we don't care about the specific state variable 1 means we care about it
-    Q: np.diag = np.diag([1.0, 1.0, 1.0, 0, 0, 0, 0])
-    R: np.diag = np.diag([0.01, 0.1, 0.1, 1])
+    Q: np.diag = np.diag([0.1, 0.1, 0.1, 0, 0, 0, 0])
+    R: np.diag = np.diag([0.2, 0.5, 0.3, 1])
     pew_pew_params: Dict[str, float] = {
         'weight': 1.0,
         'radius_target': 2.0,
         'safe_distance': 2.0,
-        'effector_range': 20.0,
+        'effector_range': 15.0,
         'effector_angle': np.deg2rad(60),
     }
     obs_params: Dict[str, float] = {
-        'safe_distance': 3.0,
+        'safe_distance': 5.0,
     }
     # we will now slot the MPC weights into the MPCParams class
-    mpc_params: MPCParams = MPCParams(Q=Q, R=R, N=15, dt=0.1)
+    mpc_params: MPCParams = MPCParams(Q=Q, R=R, N=20, dt=0.1)
     # formulate your optimal control problem
     plane_opt_control: SourceOptControl = SourceOptControl(
         mpc_params=mpc_params, casadi_model=plane_model,
@@ -270,7 +268,7 @@ def main(args=None):
     else:
         print("Not all elements are NaN")
 
-    xF: np.array = np.array([-200, -250, 50, 0, 0, 0, 15])
+    xF: np.array = np.array([200, 250, 50, 0, 0, 0, 15])
     u_0: np.array = np.array([0, 0, 0, 15])
 
     closed_loop_sim: CloseLoopSim = CloseLoopSim(

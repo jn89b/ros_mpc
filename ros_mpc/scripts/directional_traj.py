@@ -56,7 +56,7 @@ class DirectionalTraj(Node):
                                                   self.mavros_state_callback,
                                                   qos_profile=SENSOR_QOS)
         self.pub_traj = self.create_publisher(
-            CtlTraj, '/directional_trajectory', 10)
+            CtlTraj, '/trajectory', 10)
 
         self.num_controls: int = 4
         self.current_enu_controls: np.array = np.array(
@@ -90,6 +90,18 @@ class DirectionalTraj(Node):
         traj_msg.yaw = ned_states['psi'].tolist()
         traj_msg.vx = ned_states['v'].tolist()
         traj_msg.idx = time_idx + 1
+
+        airspeed_error = states['v'][time_idx] - self.enu_state[6]        
+        kp_airspeed:float = 0.25
+        airspeed_cmd:float = kp_airspeed * airspeed_error
+        min_thrust:float = 0.05
+        max_thrust:float = 0.95
+        thrust_cmd:float = np.clip(
+            airspeed_cmd, min_thrust, max_thrust)
+        traj_msg.thrust = [thrust_cmd,
+                           thrust_cmd,
+                           thrust_cmd,
+                           thrust_cmd] 
 
         phi_cmd_rad: float = states['phi'][time_idx]
         theta_cmd_rad: float = states['theta'][time_idx]
@@ -262,7 +274,7 @@ def main(args=None):
 
     # now set your initial conditions for this case its the plane
     # x0: np.array = np.array([5, 5, 10, 0, 0, 0, 15])
-    xF: np.array = np.array([200, 250, 50, 0, 0, 0, 15])
+    xF: np.array = np.array([0, 250, 60, 0, 0, 0, 15])
     u_0: np.array = np.array([0, 0, 0, 15])
 
     closed_loop_sim: CloseLoopSim = CloseLoopSim(
