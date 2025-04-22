@@ -16,7 +16,8 @@ from ros_mpc.rotation_utils import (ned_to_enu_states,
                                     euler_from_quaternion,
                                     convert_enu_state_sol_to_ned)
 
-from optitraj.mpc.PlaneOptControl import PlaneOptControl
+# from optitraj.mpc.PlaneOptControl import PlaneOptControl
+from ros_mpc.PlaneOptControl import PlaneOptControl
 from optitraj.utils.data_container import MPCParams
 from optitraj.close_loop import CloseLoopSim
 

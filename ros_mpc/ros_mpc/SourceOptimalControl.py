@@ -1,6 +1,6 @@
 import numpy as np
 import casadi as ca
-from optitraj.mpc.optimization import OptimalControlProblem
+from ros_mpc.OptimalControlProblem import OptimalControlProblem
 from optitraj.utils.data_container import MPCParams
 from optitraj.models.casadi_model import CasadiModel
 from typing import Tuple, List
