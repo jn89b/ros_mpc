@@ -14,30 +14,36 @@ class Obstacle:
     radius: float
 
 
-class SourceOptControl(OptimalControlProblem):
-    """
-    Example of a class that inherits from OptimalControlProblem
-    for the Plane model using Casadi, can be used for 
-    obstacle avoidance
-    """
-
+class SourceOptimalControl(OptimalControlProblem):
     def __init__(self,
-                mpc_params: MPCParams,
-                casadi_model: CasadiModel,
-                pew_pew_params:Dict[str,float],
-                use_obs_avoidance: bool = False,
-                obs_params: List[Obstacle] = None,
-                robot_radius: float = 3.0) -> None:
+                 mpc_params: MPCParams,
+                 casadi_model: CasadiModel,
+                 obs_params: List[Obstacle]) -> None:
         super().__init__(mpc_params,
                          casadi_model)
-        self.use_obs_avoidance: bool = use_obs_avoidance
         self.obs_params: List[Obstacle] = obs_params
-        self.robot_radius: float = robot_radius
-        if self.use_obs_avoidance:
-            print("Using obstacle avoidance")
-            # self.is_valid_obs_params()
-            self.set_obstacle_avoidance_constraints()
-        self.pew_pew_params = pew_pew_params
+        self.robot_radius: float = 3.0
+        self.set_obstacle_avoidance_constraints()
+
+    def compute_dynamics_cost(self) -> ca.MX:
+        """
+        Compute the dynamics cost for the optimal control problem
+        """
+        # initialize the cost
+        cost = 0.0
+        Q = self.mpc_params.Q
+        R = self.mpc_params.R
+
+        x_final = self.P[self.casadi_model.n_states:]
+
+        for k in range(self.N):
+            states = self.X[:, k]
+            controls = self.U[:, k]
+            cost += cost \
+                + (states - x_final).T @ Q @ (states - x_final) \
+                + controls.T @ R @ controls
+
+        return cost
 
     def set_obstacle_avoidance_constraints(self) -> None:
         """
@@ -148,12 +154,6 @@ class SourceOptControl(OptimalControlProblem):
             #all other controls except for the velocity
             controls_cost = ca.sumsqr(self.U[:3, i]) * 0.2
             effector_cost += effector_dmg  + controls_cost
-
-            # constraint to make sure we don't get too close to the target and crash into it
-            safe_distance = self.obs_params['safe_distance']
-            diff = -dtarget + \
-                self.pew_pew_params['radius_target'] + safe_distance
-            self.g = ca.vertcat(self.g, diff)
             
         # + time_cost
         total_effector_cost = self.pew_pew_params['weight'] * \
@@ -161,34 +161,9 @@ class SourceOptControl(OptimalControlProblem):
 
         return total_effector_cost  
 
-    def compute_dynamics_cost(self) -> MX:
-        """
-        Compute the dynamics cost for the optimal control problem
-        """
-        # initialize the cost
-        cost:float = 0.0
-        Q = self.mpc_params.Q
-        R = self.mpc_params.R
-
-        x_final = self.P[self.casadi_model.n_states:]
-
-        for k in range(self.N):
-            states = self.X[:, k]
-            controls = self.U[:, k]
-            cost += cost \
-                + (states - x_final).T @ Q @ (states - x_final) \
-                + controls.T @ R @ controls
-
+    def compute_total_cost(self) -> ca.MX:
+        cost = self.compute_dynamics_cost()
         return cost
-    
-    def compute_total_cost(self):
-        """
-        Compute the total cost for the optimal control problem
-        """
-        dynamics_cost = self.compute_dynamics_cost()
-        omni_cost = self.compute_omni_cost()
-        total_cost = omni_cost
-        return total_cost
 
     def solve(self, x0: np.ndarray, xF: np.ndarray, u0: np.ndarray) -> np.ndarray:
         """
@@ -205,42 +180,29 @@ class SourceOptControl(OptimalControlProblem):
         n_controls = self.casadi_model.n_controls
         # self.compute_obstacle_avoidance_cost()
 
-        if self.use_obs_avoidance and self.obs_params is not None:
-            # set the obstacle avoidance constraints
-            num_obstacles = len(self.obs_params)  # + 1
-            num_obstacle_constraints = num_obstacles * (self.N)
-            # Constraints for lower and upp bound for state constraints
-            # First handle state constraints
-            lbg_states = ca.DM.zeros((n_states*(self.N+1), 1))
-            ubg_states = ca.DM.zeros((n_states*(self.N+1), 1))
+        # set the obstacle avoidance constraints
+        num_obstacles = len(self.obs_params)  # + 1
+        num_obstacle_constraints = num_obstacles * (self.N)
+        # Constraints for lower and upp bound for state constraints
+        # First handle state constraints
+        lbg_states = ca.DM.zeros((n_states*(self.N+1), 1))
+        ubg_states = ca.DM.zeros((n_states*(self.N+1), 1))
 
-            # Now handle the obstacle avoidance constraints and add them at the bottom
-            # Obstacles' lower bound constraints (-inf)
-            # this is set up where -distance + radius <= 0
-            lbg_obs = ca.DM.zeros((num_obstacle_constraints, 1))
-            lbg_obs[:] = -ca.inf
-            ubg_obs = ca.DM.zeros((num_obstacle_constraints, 1))
-            # Concatenate state constraints and obstacle constraints (state constraints come first)
-            lbg = ca.vertcat(lbg_states, lbg_obs)
-            ubg = ca.vertcat(ubg_states, ubg_obs)  # Same for the upper bounds
-        else:
-            # we will use the target location as a constraint 
-            target_constraints = 1 
-            num_constraints = target_constraints * self.N
-            lbg_states = ca.DM.zeros((n_states*(self.N+1), 1))
-            ubg_states = ca.DM.zeros((n_states*(self.N+1), 1))
-            
-            lbg_obs = ca.DM.zeros((num_constraints, 1))
-            lbg_obs[:] = -ca.inf
-            ubg_obs = ca.DM.zeros((num_constraints, 1))
-            # Concatenate state constraints and obstacle constraints (state constraints come first)
-            lbg = ca.vertcat(lbg_states, lbg_obs)
-            ubg = ca.vertcat(ubg_states, ubg_obs)
-
+        # Now handle the obstacle avoidance constraints and add them at the bottom
+        # Obstacles' lower bound constraints (-inf)
+        # this is set up where -distance + radius <= 0
+        lbg_obs = ca.DM.zeros((num_obstacle_constraints, 1))
+        lbg_obs[:] = -ca.inf
+        ubg_obs = ca.DM.zeros((num_obstacle_constraints, 1))
+        # Concatenate state constraints and obstacle constraints (state constraints come first)
+        # Concatenate state constraints and then obstacle constraints
+        lbg = ca.vertcat(lbg_states, lbg_obs)
+        ubg = ca.vertcat(ubg_states, ubg_obs)  # Same for the upper bounds
 
         args = {
-            'lbg': lbg,
+            'lbg': lbg,  # dynamic constraints and path constraint
             'ubg': ubg,
+            # state and control constriaints
             'lbx': self.pack_variables_fn(**self.lbx)['flat'],
             'ubx': self.pack_variables_fn(**self.ubx)['flat'],
         }
@@ -262,5 +224,7 @@ class SourceOptControl(OptimalControlProblem):
             ubg=args['ubg'],
             p=args['p']
         )
+
         return solution
+
 

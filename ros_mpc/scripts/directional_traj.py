@@ -84,7 +84,8 @@ class DirectionalTraj(Node):
         traj_msg.idx = time_idx
         traj_msg.x = ned_states['x'].tolist()
         traj_msg.y = ned_states['y'].tolist()
-        traj_msg.z = ned_states['z'].tolist()
+        #traj_msg.z = ned_states['z'].tolist()
+        traj_msg.z = [-65.0, -65.0, -65.0, -65.0]
         traj_msg.roll = ned_states['phi'].tolist()
         traj_msg.pitch = ned_states['theta'].tolist()
         traj_msg.yaw = ned_states['psi'].tolist()
@@ -94,8 +95,8 @@ class DirectionalTraj(Node):
         airspeed_error = states['v'][time_idx] - self.enu_state[6]        
         kp_airspeed:float = 0.25
         airspeed_cmd:float = kp_airspeed * airspeed_error
-        min_thrust:float = 0.05
-        max_thrust:float = 0.95
+        min_thrust:float = 0.15
+        max_thrust:float = 0.85
         thrust_cmd:float = np.clip(
             airspeed_cmd, min_thrust, max_thrust)
         traj_msg.thrust = [thrust_cmd,
@@ -168,12 +169,6 @@ class DirectionalTraj(Node):
         vz = msg.twist.twist.linear.z
         # get magnitude of velocity
         self.enu_state[6] = np.sqrt(vx**2 + vy**2 + vz**2)
-        # self.state_info[6] = #msg.twist.twist.linear.x
-        # self.control_info[0] = msg.twist.twist.angular.x
-        # self.control_info[1] = msg.twist.twist.angular.y
-        # self.control_info[2] = msg.twist.twist.angular.z
-        # self.control_info[3] = msg.twist.twist.linear.x
-
 
 def build_model(control_limits: Dict[str, Dict[str, float]],
                 state_limits: Dict[str, Dict[str, float]]) -> PlaneKinematicModel:
@@ -250,7 +245,7 @@ def main(args=None):
         'phi': {'min': -np.deg2rad(45), 'max': np.deg2rad(45)},
         'theta': {'min': -np.deg2rad(15), 'max': np.deg2rad(15)},
         'psi': {'min': -np.pi, 'max': np.pi},
-        'v': {'min': 15, 'max': 30.0}
+        'v': {'min': 20, 'max': 30.0}
     }
 
     plane_model: PlaneKinematicModel = build_model(
@@ -306,25 +301,30 @@ def main(args=None):
     # Compute single step of the closed loop simulation
     # Get results that are ENU
     
-    while rclpy.ok() and time.time():
-
-        rclpy.spin_once(traj_node)
-        start_sol_time: float = time.time()
-        closed_loop_sim.x_init = traj_node.enu_state
-        solution: Dict[str, Any] = closed_loop_sim.run_single_step(
-            xF=xF,
-            x0=traj_node.enu_state,
-            u0=traj_node.current_enu_controls)
-        delta_sol_time: float = time.time() - start_sol_time
-        # distance
-        print("traj node state: ", traj_node.enu_state[0:3])
-        distance = np.linalg.norm(
-            np.array(traj_node.enu_state[0:3]) - np.array(xF[0:3]))
-        print("Distance: ", distance)
-        # publish the trajectory
-        traj_node.publish_traj(solution, delta_sol_time,
-                               idx_buffer=1)
-
+    while rclpy.ok():
+        try:
+            rclpy.spin_once(traj_node, timeout_sec=0.1)
+            start_sol_time: float = time.time()
+            closed_loop_sim.x_init = traj_node.enu_state
+            solution: Dict[str, Any] = closed_loop_sim.run_single_step(
+                xF=xF,
+                x0=traj_node.enu_state,
+                u0=traj_node.current_enu_controls)
+            delta_sol_time: float = time.time() - start_sol_time
+            # distance
+            distance = np.linalg.norm(
+                np.array(traj_node.enu_state[0:3]) - np.array(xF[0:3]))
+            print("Distance: ", distance)
+            # publish the trajectory
+            traj_node.publish_traj(solution, delta_sol_time,
+                                idx_buffer=2)
+        except KeyboardInterrupt:
+            print("Keyboard interrupt")
+            break
+    
+    traj_node.destroy_node()
+    rclpy.shutdown()
+    return 
 
 if __name__ == "__main__":
     main()
