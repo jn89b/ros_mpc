@@ -116,8 +116,9 @@ class SourceOptimalControl(OptimalControlProblem):
 
             # these exponential functions will be used to account for the distance and angle of the target
             # the closer we are to the target the more the distance factor will be close to 1
+            effector_range = 10
             error_dist_factor = ca.exp(-k_range *
-                                       dtarget/self.pew_pew_params['effector_range'])
+                                       dtarget/effector_range)
             # error_dist = dtarget/self.Effector.effector_range
 
             left_wing = ca.pi
@@ -142,7 +143,7 @@ class SourceOptimalControl(OptimalControlProblem):
             # # mounting on the sides of the vehicle
             # # effector_dmg = (ratio_distance + (ratio_theta +
             # #                 (0*abs_dot_product) + ratio_psi + ratio_phi))
-            effector_dmg = dtarget + abs_dot_product 
+            effector_dmg = dtarget**2 + abs_dot_product
             # this is time on target
             # this velocity penalty will be used to slow down the vehicle as it gets closer to the target
             quad_v_max = (v_cmd - v_max)**2
@@ -156,13 +157,15 @@ class SourceOptimalControl(OptimalControlProblem):
             effector_cost += effector_dmg  + controls_cost
             
         # + time_cost
-        total_effector_cost = self.pew_pew_params['weight'] * \
+        effector_weight = 0.5
+        total_effector_cost = effector_weight * \
             ca.sum2(effector_cost)
 
         return total_effector_cost  
 
     def compute_total_cost(self) -> ca.MX:
         cost = self.compute_dynamics_cost()
+        #cost = self.compute_omni_cost()
         return cost
 
     def solve(self, x0: np.ndarray, xF: np.ndarray, u0: np.ndarray) -> np.ndarray:

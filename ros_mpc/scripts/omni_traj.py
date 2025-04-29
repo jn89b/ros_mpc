@@ -21,6 +21,7 @@ from optitraj.utils.data_container import MPCParams
 from optitraj.close_loop import CloseLoopSim
 from dataclasses import dataclass
 from typing import List, Dict, Any, Tuple
+from rl_ros.PID import FirstOrderFilter, PID
 
 X_IDX = 0
 Y_IDX = 1
@@ -34,6 +35,45 @@ U_PHI_IDX = 0
 U_THETA_IDX = 1
 U_PSI_IDX = 2
 V_CMD_IDX = 3
+
+def yaw_enu_to_ned(yaw_enu: float) -> float:
+    """
+    Convert yaw angle from ENU to NED.
+
+    The conversion is symmetric:
+        yaw_ned = (pi/2 - yaw_enu) wrapped to [-pi, pi]
+
+    Parameters:
+        yaw_enu (float): Yaw angle in radians in the ENU frame.
+
+    Returns:
+        float: Yaw angle in radians in the NED frame.
+    """
+    yaw_ned = np.pi/2 - yaw_enu
+    return wrap_to_pi(yaw_ned)
+
+
+def wrap_to_pi(angle: float) -> float:
+    """
+    Wrap an angle in radians to the range [-pi, pi].
+
+    Parameters:
+        angle (float): Angle in radians.
+
+    Returns:
+        float: Angle wrapped to [-pi, pi].
+    """
+    return (angle + np.pi) % (2 * np.pi) - np.pi
+
+
+def get_relative_ned_yaw_cmd(
+        current_ned_yaw: float,
+        inert_ned_yaw_cmd: float) -> float:
+
+    yaw_cmd: float = inert_ned_yaw_cmd - current_ned_yaw
+
+    # wrap the angle to [-pi, pi]
+    return wrap_to_pi(yaw_cmd)
 
 
 @dataclass
@@ -57,6 +97,12 @@ class OmniTraj(Node):
         # self.sub_traj = self.create_subscription(
         #     Telem, 'telem', self.subscribe_telem, 10)
 
+        self.dz_controller: PID = PID(
+            kp=0.1, ki=0.0, kd=0.01,
+            min_constraint=np.deg2rad(-12),
+            max_constraint=np.deg2rad(10),
+            use_derivative=True,
+            dt = 0.025)
         self.state_sub = self.create_subscription(mavros.local_position.Odometry,
                                                   'mavros/local_position/odom',
                                                   self.mavros_state_callback,
@@ -85,23 +131,39 @@ class OmniTraj(Node):
         states: Dict[str, np.array] = states
         controls: Dict[str, np.array] = controls
         ned_states: Dict[str, np.array] = convert_enu_state_sol_to_ned(states)
-
+        
         traj_msg: CtlTraj = CtlTraj()
         traj_msg.idx = time_idx
         traj_msg.x = ned_states['x'].tolist()
         traj_msg.y = ned_states['y'].tolist()
-        #traj_msg.z = ned_states['z'].tolist()
-        traj_msg.z = [-65.0, -65.0, -65.0, -65.0]
+        traj_msg.z = ned_states['z'].tolist()
         traj_msg.roll = ned_states['phi'].tolist()
-        traj_msg.pitch = ned_states['theta'].tolist()
-        traj_msg.yaw = ned_states['psi'].tolist()
+        
+        dz:float = 60 - self.enu_state[2]
+        if self.dz_controller.prev_error is None:
+            self.dz_controller.prev_error = 0.0
+            
+        pitch_cmd = self.dz_controller.compute(
+            setpoint=dz,
+            current_value=0.0,
+            dt=0.05
+        )
+        pitch_cmd = np.clip(pitch_cmd, -np.deg2rad(10), np.deg2rad(10))
+        traj_msg.pitch = [pitch_cmd, pitch_cmd, pitch_cmd, pitch_cmd]
+        current_ned_yaw: float = yaw_enu_to_ned(self.enu_state[5])
+        # traj_msg.yaw = ned_states['psi'].tolist()
+        ned_yaw = ned_states['psi'].tolist()
+        ned_yaw_cmd = [get_relative_ned_yaw_cmd(
+            current_ned_yaw, ned_yaw[i]) for i in range(len(ned_yaw))]
+        traj_msg.yaw = ned_yaw_cmd
+        
         traj_msg.vx = ned_states['v'].tolist()
         traj_msg.idx = time_idx + 1
 
-        airspeed_error = abs(states['v'][time_idx] - self.enu_state[6])        
+        airspeed_error = states['v'][time_idx] - self.enu_state[6]        
         kp_airspeed:float = 0.25
         airspeed_cmd:float = kp_airspeed * airspeed_error
-        min_thrust:float = 0.3
+        min_thrust:float = 0.4
         max_thrust:float = 0.7
         thrust_cmd:float = np.clip(
             airspeed_cmd, min_thrust, max_thrust)
@@ -109,7 +171,6 @@ class OmniTraj(Node):
                            thrust_cmd,
                            thrust_cmd,
                            thrust_cmd] 
-
         phi_cmd_rad: float = states['phi'][time_idx]
         theta_cmd_rad: float = states['theta'][time_idx]
         psi_cmd_rad: float = states['psi'][time_idx]
@@ -175,12 +236,6 @@ class OmniTraj(Node):
         vz = msg.twist.twist.linear.z
         # get magnitude of velocity
         self.enu_state[6] = np.sqrt(vx**2 + vy**2 + vz**2)
-        # self.state_info[6] = #msg.twist.twist.linear.x
-        # self.control_info[0] = msg.twist.twist.angular.x
-        # self.control_info[1] = msg.twist.twist.angular.y
-        # self.control_info[2] = msg.twist.twist.angular.z
-        # self.control_info[3] = msg.twist.twist.linear.x
-
 
 def build_model(control_limits: Dict[str, Dict[str, float]],
                 state_limits: Dict[str, Dict[str, float]]) -> PlaneKinematicModel:
@@ -238,6 +293,40 @@ def get_time_idx(dt: float, solution_time: float,
 
     return idx
 
+def unpack_optimal_control_results(
+        optimal_control_results: Dict[str, Any]) -> Tuple[Dict[str, np.array], Dict[str, np.array]]:
+    """
+    Unpack the results of the optimal control problem
+    """
+    states: Dict[str, np.array] = optimal_control_results['states']
+    controls: Dict[str, np.array] = optimal_control_results['controls']
+
+    return states, controls
+
+
+def get_time_idx(dt: float, solution_time: float,
+                 idx_buffer: int = 0) -> int:
+    """
+    Args:
+        dt (float): time step
+        solution_time (float): time it took to solve the problem
+        idx_buffer (int): buffer for the index
+    Returns:
+        int: index for the time step
+
+    Returns the index of the time step that is closest to the solution time
+    used to buffer the commands sent to the drone
+    """
+    time_rounded = round(solution_time, 1)
+
+    if time_rounded <= 1:
+        time_rounded = 1
+
+    ctrl_idx = dt/time_rounded
+    idx = int(round(ctrl_idx)) + idx_buffer
+
+    return idx
+
 
 def main(args=None):
     rclpy.init(args=args)
@@ -248,7 +337,7 @@ def main(args=None):
         'u_phi': {'min': -np.deg2rad(45), 'max': np.deg2rad(45)},
         'u_theta': {'min': -np.deg2rad(10), 'max': np.deg2rad(10)},
         'u_psi': {'min': -np.deg2rad(180), 'max': np.deg2rad(180)},
-        'v_cmd': {'min': 10.0, 'max': 30.0}
+        'v_cmd': {'min': 20, 'max': 30.0}
     }
     state_limits_dict: Dict[str, Dict[str, float]] = {
         'x': {'min': -np.inf, 'max': np.inf},
@@ -257,7 +346,7 @@ def main(args=None):
         'phi': {'min': -np.deg2rad(45), 'max': np.deg2rad(45)},
         'theta': {'min': -np.deg2rad(15), 'max': np.deg2rad(15)},
         'psi': {'min': -np.pi, 'max': np.pi},
-        'v': {'min': 20, 'max': 30.0}
+        'v': {'min': 20, 'max': 25.0}
     }
 
     plane_model: PlaneKinematicModel = build_model(
@@ -266,7 +355,7 @@ def main(args=None):
     # now we will set the MPC weights for the plane
     # 0 means we don't care about the specific state variable 1 means we care about it
     Q: np.diag = np.diag([1.0, 1.0, 1.0, 0, 0, 0, 0])
-    R: np.diag = np.diag([0.0, 0.01, 0.01, 1])
+    R: np.diag = np.diag([0.2, 0.25, 0.25, 1])
 
     # we will now slot the MPC weights into the MPCParams class
     mpc_params: MPCParams = MPCParams(Q=Q, R=R, N=15, dt=0.1)
@@ -274,10 +363,10 @@ def main(args=None):
 
     # now set your initial conditions for this case its the plane
     # x0: np.array = np.array([5, 5, 10, 0, 0, 0, 15])
-    xF: np.array = np.array([0, 250, 60, 0, 0, 0, 15])
+    xF: np.array = np.array([-50, 175, 60, 0, 0, 0, 15])
     u_0: np.array = np.array([0, 0, 0, 15])
     obstacle_list: List[Obstacle] = []
-    obstacle_list.append(Obstacle(center=[xF[0], xF[1], xF[2]], radius=5.0))
+    obstacle_list.append(Obstacle(center=[xF[0], xF[1], xF[2]], radius=10.0))
     
     plane_opt_control: SourceOptimalControl  = SourceOptimalControl(
         mpc_params=mpc_params, casadi_model=plane_model,
@@ -289,8 +378,6 @@ def main(args=None):
     else:
         print("Not all elements are NaN")
 
-
-
     closed_loop_sim: CloseLoopSim = CloseLoopSim(
         optimizer=plane_opt_control,
         x_init=traj_node.enu_state,
@@ -300,20 +387,13 @@ def main(args=None):
         N=100
     )
 
-    # enu_traj: Dict[str, Any] = closed_loop_sim.run_single_step(
-    #     xF=xF, u0=u_0)
-
-    # time_duration: float = 20.0
-    # time_start: float = time.time()
-
-    # Initialize the node - X
-    # Initialize optimization routine - X
-    # Initiailze the closed loop simulation - X
-    # recieve callback state information from the drone
-    # set initial states and controls
-    # set final states
-    # run single step
-
+    if np.all(np.isnan(traj_node.current_enu_controls)):
+        # set to current states
+        traj_node.current_enu_controls = np.array([
+            0, 
+            0, 
+            0, 
+            15])
     # In main loop:
     # callback information from drone
     # update the initial condition and initial control

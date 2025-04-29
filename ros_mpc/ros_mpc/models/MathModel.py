@@ -141,9 +141,9 @@ class PlaneKinematicModel(CasadiModel):
     def __init__(self,
                  dt_val: float = 0.1,
                  tau_v: float = 0.15,
-                 tau_phi: float = 0.1,
-                 tau_theta: float = 0.05,
-                 tau_psi: float = 0.15,
+                 tau_phi: float = 0.07,
+                 tau_theta: float = 0.1,
+                 tau_psi: float = 0.10,
                  tau_p: float = 0.1,
                  tau_q: float = 0.1,
                  tau_r: float = 0.1) -> None:

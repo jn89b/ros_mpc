@@ -20,6 +20,7 @@ from ros_mpc.rotation_utils import (ned_to_enu_states,
 from ros_mpc.PlaneOptControl import PlaneOptControl
 from optitraj.utils.data_container import MPCParams
 from optitraj.close_loop import CloseLoopSim
+from rl_ros.PID import FirstOrderFilter, PID
 
 from typing import List, Dict, Any, Tuple
 
@@ -36,6 +37,47 @@ U_THETA_IDX = 1
 U_PSI_IDX = 2
 V_CMD_IDX = 3
 
+def yaw_enu_to_ned(yaw_enu: float) -> float:
+    """
+    Convert yaw angle from ENU to NED.
+
+    The conversion is symmetric:
+        yaw_ned = (pi/2 - yaw_enu) wrapped to [-pi, pi]
+
+    Parameters:
+        yaw_enu (float): Yaw angle in radians in the ENU frame.
+
+    Returns:
+        float: Yaw angle in radians in the NED frame.
+    """
+    yaw_ned = np.pi/2 - yaw_enu
+    return wrap_to_pi(yaw_ned)
+
+
+def wrap_to_pi(angle: float) -> float:
+    """
+    Wrap an angle in radians to the range [-pi, pi].
+
+    Parameters:
+        angle (float): Angle in radians.
+
+    Returns:
+        float: Angle wrapped to [-pi, pi].
+    """
+    return (angle + np.pi) % (2 * np.pi) - np.pi
+
+
+def get_relative_ned_yaw_cmd(
+        current_ned_yaw: float,
+        inert_ned_yaw_cmd: float) -> float:
+
+    yaw_cmd: float = inert_ned_yaw_cmd - current_ned_yaw
+
+    # wrap the angle to [-pi, pi]
+    return wrap_to_pi(yaw_cmd)
+
+
+
 class DirectionalTraj(Node):
     def __init__(self,
                  pub_freq: int = 100,
@@ -51,7 +93,12 @@ class DirectionalTraj(Node):
 
         # self.sub_traj = self.create_subscription(
         #     Telem, 'telem', self.subscribe_telem, 10)
-
+        self.dz_controller: PID = PID(
+            kp=0.1, ki=0.0, kd=0.01,
+            min_constraint=np.deg2rad(-12),
+            max_constraint=np.deg2rad(10),
+            use_derivative=True,
+            dt = 0.025)
         self.state_sub = self.create_subscription(mavros.local_position.Odometry,
                                                   'mavros/local_position/odom',
                                                   self.mavros_state_callback,
@@ -85,19 +132,34 @@ class DirectionalTraj(Node):
         traj_msg.idx = time_idx
         traj_msg.x = ned_states['x'].tolist()
         traj_msg.y = ned_states['y'].tolist()
-        #traj_msg.z = ned_states['z'].tolist()
-        traj_msg.z = [-65.0, -65.0, -65.0, -65.0]
+        traj_msg.z = ned_states['z'].tolist()
         traj_msg.roll = ned_states['phi'].tolist()
-        traj_msg.pitch = ned_states['theta'].tolist()
-        traj_msg.yaw = ned_states['psi'].tolist()
+        dz:float = 65.0 - self.enu_state[2]
+        if self.dz_controller.prev_error is None:
+            self.dz_controller.prev_error = 0.0
+            
+        pitch_cmd = self.dz_controller.compute(
+            setpoint=dz,
+            current_value=0.0,
+            dt=0.05
+        )
+        pitch_cmd = np.clip(pitch_cmd, -np.deg2rad(10), np.deg2rad(10))
+        traj_msg.pitch = [pitch_cmd, pitch_cmd, pitch_cmd, pitch_cmd]
+        current_ned_yaw: float = yaw_enu_to_ned(self.enu_state[5])
+        # traj_msg.yaw = ned_states['psi'].tolist()
+        ned_yaw = ned_states['psi'].tolist()
+        ned_yaw_cmd = [get_relative_ned_yaw_cmd(
+            current_ned_yaw, ned_yaw[i]) for i in range(len(ned_yaw))]
+        traj_msg.yaw = ned_yaw_cmd
+
         traj_msg.vx = ned_states['v'].tolist()
         traj_msg.idx = time_idx + 1
 
         airspeed_error = states['v'][time_idx] - self.enu_state[6]        
         kp_airspeed:float = 0.25
         airspeed_cmd:float = kp_airspeed * airspeed_error
-        min_thrust:float = 0.15
-        max_thrust:float = 0.85
+        min_thrust:float = 0.4
+        max_thrust:float = 0.7
         thrust_cmd:float = np.clip(
             airspeed_cmd, min_thrust, max_thrust)
         traj_msg.thrust = [thrust_cmd,
@@ -109,6 +171,7 @@ class DirectionalTraj(Node):
         theta_cmd_rad: float = states['theta'][time_idx]
         psi_cmd_rad: float = states['psi'][time_idx]
         vel_cmd: float = states['v'][time_idx]
+
 
         self.pub_traj.publish(traj_msg)
         self.update_controls(
@@ -255,7 +318,7 @@ def main(args=None):
     # now we will set the MPC weights for the plane
     # 0 means we don't care about the specific state variable 1 means we care about it
     Q: np.diag = np.diag([1.0, 1.0, 1.0, 0, 0, 0, 0])
-    R: np.diag = np.diag([0.01, 0.01, 0.01, 1])
+    R: np.diag = np.diag([0.25, 0.25, 0.25, 1])
 
     # we will now slot the MPC weights into the MPCParams class
     mpc_params: MPCParams = MPCParams(Q=Q, R=R, N=15, dt=0.1)
@@ -270,7 +333,7 @@ def main(args=None):
 
     # now set your initial conditions for this case its the plane
     # x0: np.array = np.array([5, 5, 10, 0, 0, 0, 15])
-    xF: np.array = np.array([0, 250, 60, 0, 0, 0, 15])
+    xF: np.array = np.array([-50, 175, 60, 0, 0, 0, 15])
     u_0: np.array = np.array([0, 0, 0, 15])
 
     closed_loop_sim: CloseLoopSim = CloseLoopSim(
@@ -314,7 +377,7 @@ def main(args=None):
             delta_sol_time: float = time.time() - start_sol_time
             # distance
             distance = np.linalg.norm(
-                np.array(traj_node.enu_state[0:3]) - np.array(xF[0:3]))
+                np.array(traj_node.enu_state[0:2]) - np.array(xF[0:2]))
             print("Distance: ", distance)
             # publish the trajectory
             traj_node.publish_traj(solution, delta_sol_time,
