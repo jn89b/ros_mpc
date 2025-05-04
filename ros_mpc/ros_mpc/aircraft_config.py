@@ -24,7 +24,7 @@ USE_RANDOM = False
 # TODO: This is dumb but will work for now, should have a better way to do this
 # probably make a service to update the new goal state
 GOAL_STATE = [
-    250.0,  # x
+    -250.0,  # x
     -150.0,  # y
     50.0,  # z
     0.0,  # phi

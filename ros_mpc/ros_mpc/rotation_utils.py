@@ -1,5 +1,6 @@
 import numpy as np
 import casadi as ca
+from typing import Dict, List, Any
 
 def rot2d(psi):
     return np.array([[np.cos(psi), -np.sin(psi)],
@@ -149,3 +150,168 @@ def convertENUToNEDVector(x_enu:np.ndarray, y_enu:np.ndarray, z_enu:np.ndarray) 
     ned_y = x_enu
     ned_z = -z_enu
     return ned_x, ned_y, ned_z  
+
+
+def ned_to_enu_states(ned_state:np.array) -> np.array:
+    enu_state: np.array = np.zeros(7)
+    enu_state[0] = ned_state[1] 
+    enu_state[1] = ned_state[0] 
+    enu_state[2] = -ned_state[2]
+    enu_state[3] = -ned_state[3]
+    enu_state[4] = ned_state[4]
+    enu_state[5] = yaw_ned_to_enu(ned_state[5])
+    enu_state[6] = ned_state[6]
+    return enu_state
+
+def enu_to_ned_states(enu_state:np.array) -> np.array:
+    ned_state: np.array = np.zeros(7)
+    ned_state[0] = enu_state[1] 
+    ned_state[1] = enu_state[0] 
+    ned_state[2] = -enu_state[2]
+    ned_state[3] = -enu_state[3]
+    ned_state[4] = enu_state[4]
+    ned_state[5] = yaw_enu_to_ned(enu_state[5])
+    ned_state[6] = enu_state[6]
+    return ned_state
+    
+def enu_to_ned_controls(enu_controls:np.array,
+                        change_yaw:bool=False) -> np.array:
+    """
+    Controls are in the form of [phi, theta, psi, velocity]
+    """
+    ned_controls: np.array = np.zeros(4)
+    ned_controls[0] = -enu_controls[0]
+    ned_controls[1] = enu_controls[1]
+    if change_yaw:
+        ned_controls[2] = -enu_controls[2]
+    else:
+        ned_controls[2] = enu_controls[2] 
+    ned_controls[3] = enu_controls[3]
+    return ned_controls
+    
+def enu_to_ned_controls(enu_controls:np.array,
+                        change_yaw:bool=False) -> np.array:
+    """
+    Controls are in the form of [phi, theta, psi, velocity]
+    """
+    
+    ned_controls: np.array = np.zeros(4)
+    ned_controls[0] = -enu_controls[0]
+    ned_controls[1] = enu_controls[1]
+    if change_yaw:
+        ned_controls[2] = -enu_controls[2]
+    else:
+        ned_controls[2] = enu_controls[2]
+    ned_controls[3] = enu_controls[3]
+    return ned_controls
+    
+def wrap_to_pi(angle:float) -> float:
+    """
+    Wrap an angle in radians to the range [-pi, pi].
+
+    Parameters:
+        angle (float): Angle in radians.
+    
+    Returns:
+        float: Angle wrapped to [-pi, pi].
+    """
+    return (angle + np.pi) % (2 * np.pi) - np.pi
+
+def yaw_ned_to_enu(yaw_ned:float) -> float:
+    """
+    Convert yaw angle from NED to ENU.
+    
+    In the NED frame, yaw is measured clockwise from North.
+    In the ENU frame, yaw is measured counterclockwise from East.
+    
+    The conversion formula in radians is:
+        yaw_enu = (pi/2 - yaw_ned) wrapped to [-pi, pi]
+
+    Parameters:
+        yaw_ned (float): Yaw angle in radians in the NED frame.
+        
+    Returns:
+        float: Yaw angle in radians in the ENU frame.
+    """
+    yaw_enu = np.pi/2 - yaw_ned
+    return wrap_to_pi(yaw_enu)
+
+def yaw_enu_to_ned(yaw_enu:float)-> float:
+    """
+    Convert yaw angle from ENU to NED.
+    
+    The conversion is symmetric:
+        yaw_ned = (pi/2 - yaw_enu) wrapped to [-pi, pi]
+
+    Parameters:
+        yaw_enu (float): Yaw angle in radians in the ENU frame.
+        
+    Returns:
+        float: Yaw angle in radians in the NED frame.
+    """
+    yaw_ned = np.pi/2 - yaw_enu
+    return wrap_to_pi(yaw_ned)
+
+
+def get_model_yaw_command(ned_yaw_cmd:float,
+                               ned_yaw:float) -> float:
+    """
+    The math model likes the u_psi command to be 
+    in the global frame. This function converts 
+    ned_yaw_cmd
+    """    
+    yaw_cmd:float = ned_yaw_cmd + ned_yaw
+    
+    # wrap the angle to [-pi, pi]
+    return wrap_to_pi(yaw_cmd)
+
+def get_relative_ned_yaw_cmd(
+        ned_yaw:float, 
+        relative_yaw_ned_cmd:float) -> float:
+
+    yaw_cmd:float = relative_yaw_ned_cmd - ned_yaw
+        
+        # wrap the angle to [-pi, pi]
+    return wrap_to_pi(yaw_cmd)
+
+def compute_pursuit_angle(enu_state:np.array,
+                          target_x, 
+                          target_y) -> float:
+    """
+    Yaw command is in global frame in ENU convention
+    """
+    dx:float = target_x - enu_state[0]
+    dy:float = target_y - enu_state[1]
+    enu_yaw_cmd:float = np.arctan2(dy, dx)
+    distance = np.sqrt(dx**2 + dy**2)
+
+    return enu_yaw_cmd
+
+
+def convert_enu_state_sol_to_ned(
+    states:Dict[str, np.array]) -> Dict[str, np.array]:
+    """
+    Returns the states in the NED frame 
+    """
+    ned_x = states['y']
+    ned_y = states['x']
+    ned_z = -states['z']
+    ned_roll = -states['phi']
+    ned_pitch = -states['theta']
+    ned_yaw = np.pi/2 - states['psi']
+    # wrap the yaw to [-pi, pi]
+    ned_yaw = wrap_to_pi(ned_yaw)
+    ned_v = states['v']
+    
+    return {
+        'x': ned_x,
+        'y': ned_y,
+        'z': ned_z,
+        'phi': ned_roll,
+        'theta': ned_pitch,
+        'psi': ned_yaw,
+        'v': ned_v
+    }
+    
+    
+    

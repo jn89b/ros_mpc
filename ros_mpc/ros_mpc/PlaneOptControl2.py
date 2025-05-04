@@ -411,7 +411,6 @@ class PlaneOptControl2(OptimalControlProblem):
         Shaped as a toroid we will cheaply model the toroid: 
         """
         n_states = self.model_casadi.n_states
-    
         effector_cost = 0
         
         #last obstacle is the true obstacle, this is hacky I know
