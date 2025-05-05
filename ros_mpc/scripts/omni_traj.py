@@ -138,7 +138,8 @@ class OmniTraj(Node):
         traj_msg.y = ned_states['y'].tolist()
         traj_msg.z = ned_states['z'].tolist()
         traj_msg.roll = ned_states['phi'].tolist()
-        
+        yaw_cmd = controls['u_psi']
+        ned_yaw_cmd =  (np.pi/2 - yaw_cmd)
         dz:float = 60 - self.enu_state[2]
         if self.dz_controller.prev_error is None:
             self.dz_controller.prev_error = 0.0
@@ -155,6 +156,9 @@ class OmniTraj(Node):
         ned_yaw = ned_states['psi'].tolist()
         ned_yaw_cmd = [get_relative_ned_yaw_cmd(
             current_ned_yaw, ned_yaw[i]) for i in range(len(ned_yaw))]
+        
+        # ned_yaw_cmd = [get_relative_ned_yaw_cmd(
+        #     current_ned_yaw, ned_yaw_cmd[i]) for i in range(len(ned_yaw_cmd))]
         traj_msg.yaw = ned_yaw_cmd
         
         traj_msg.vx = ned_states['v'].tolist()
@@ -336,8 +340,8 @@ def main(args=None):
     control_limits_dict: Dict[str, Dict[str, float]] = {
         'u_phi': {'min': -np.deg2rad(45), 'max': np.deg2rad(45)},
         'u_theta': {'min': -np.deg2rad(10), 'max': np.deg2rad(10)},
-        'u_psi': {'min': -np.deg2rad(180), 'max': np.deg2rad(180)},
-        'v_cmd': {'min': 20, 'max': 30.0}
+        'u_psi': {'min': -np.deg2rad(30), 'max': np.deg2rad(30)},
+        'v_cmd': {'min': 18, 'max': 22}
     }
     state_limits_dict: Dict[str, Dict[str, float]] = {
         'x': {'min': -np.inf, 'max': np.inf},
@@ -346,7 +350,7 @@ def main(args=None):
         'phi': {'min': -np.deg2rad(45), 'max': np.deg2rad(45)},
         'theta': {'min': -np.deg2rad(15), 'max': np.deg2rad(15)},
         'psi': {'min': -np.pi, 'max': np.pi},
-        'v': {'min': 20, 'max': 25.0}
+        'v': {'min': 18, 'max': 22}
     }
 
     plane_model: PlaneKinematicModel = build_model(
@@ -363,10 +367,10 @@ def main(args=None):
 
     # now set your initial conditions for this case its the plane
     # x0: np.array = np.array([5, 5, 10, 0, 0, 0, 15])
-    xF: np.array = np.array([-50, 175, 60, 0, 0, 0, 15])
+    xF: np.array = np.array([-100, -200, 60, 0, 0, 0, 15])
     u_0: np.array = np.array([0, 0, 0, 15])
     obstacle_list: List[Obstacle] = []
-    obstacle_list.append(Obstacle(center=[xF[0], xF[1], xF[2]], radius=10.0))
+    obstacle_list.append(Obstacle(center=[xF[0], xF[1], xF[2]], radius=5.0))
     
     plane_opt_control: SourceOptimalControl  = SourceOptimalControl(
         mpc_params=mpc_params, casadi_model=plane_model,

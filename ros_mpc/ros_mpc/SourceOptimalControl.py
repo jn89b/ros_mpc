@@ -135,15 +135,17 @@ class SourceOptimalControl(OptimalControlProblem):
             error_theta = ca.fabs(los_theta - pitch)
             error_phi = ca.fabs(ca.atan2(dy, dx) - roll)
 
-            # ratio_distance = (dtarget/self.pew_pew_params['effector_range'])**2
-            # ratio_theta = (error_theta/self.pew_pew_params['effector_angle'])**2
-            # ratio_phi = (error_phi/self.pew_pew_params['effector_angle'])**2
-            # ratio_psi = (error_psi/self.pew_pew_params['effector_angle'])**2
+            effector_angle = np.deg2rad(60)
+            ratio_distance = (dtarget/effector_range)**2
+            ratio_theta = (error_theta/effector_angle)**2
+            ratio_phi = (error_phi/effector_angle)**2
+            ratio_psi = (error_psi/effector_angle)**2
 
             # # mounting on the sides of the vehicle
-            # # effector_dmg = (ratio_distance + (ratio_theta +
-            # #                 (0*abs_dot_product) + ratio_psi + ratio_phi))
-            effector_dmg = dtarget**2 + abs_dot_product
+            effector_dmg = (5*ratio_distance + ((abs_dot_product) + \
+                ratio_psi + ratio_phi))
+            
+            # effector_dmg = dtarget**2 + abs_dot_product
             # this is time on target
             # this velocity penalty will be used to slow down the vehicle as it gets closer to the target
             quad_v_max = (v_cmd - v_max)**2
@@ -164,8 +166,8 @@ class SourceOptimalControl(OptimalControlProblem):
         return total_effector_cost  
 
     def compute_total_cost(self) -> ca.MX:
-        cost = self.compute_dynamics_cost()
-        #cost = self.compute_omni_cost()
+        #cost = self.compute_dynamics_cost()
+        cost = self.compute_omni_cost()
         return cost
 
     def solve(self, x0: np.ndarray, xF: np.ndarray, u0: np.ndarray) -> np.ndarray:

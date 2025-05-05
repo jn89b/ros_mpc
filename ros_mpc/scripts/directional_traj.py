@@ -333,7 +333,7 @@ def main(args=None):
 
     # now set your initial conditions for this case its the plane
     # x0: np.array = np.array([5, 5, 10, 0, 0, 0, 15])
-    xF: np.array = np.array([-50, 175, 60, 0, 0, 0, 15])
+    xF: np.array = np.array([-100, -200, 60, 0, 0, 0, 15])
     u_0: np.array = np.array([0, 0, 0, 15])
 
     closed_loop_sim: CloseLoopSim = CloseLoopSim(

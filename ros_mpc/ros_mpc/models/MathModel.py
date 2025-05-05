@@ -2,7 +2,7 @@ import casadi as ca
 from optitraj import CasadiModel
 from typing import List, Optional
 import numpy as np
-
+import math as m
 
 def wrap_to_pi(angle: ca.SX) -> ca.SX:
     """
@@ -176,7 +176,6 @@ class PlaneKinematicModel(CasadiModel):
         self.define_state_space()
         
         self.state_info: Optional[np.ndarray] = None
-        self.define_state_space()
         self.data_handler: DataHandler = DataHandler()
 
     def update_state_info(self, state_info: np.ndarray) -> None:
@@ -391,3 +390,152 @@ class PlaneKinematicModel(CasadiModel):
             if save_next_step:
                 self.data_handler.update_states(next_step)
             return next_step
+
+class SimpleKinematicModel(CasadiModel):
+    def __init__(self):
+        """
+        A simpler kinematic model of an aircraft where states are defined as:
+        - x : North position
+        - y : East position
+        - z : Up position
+        - chi X: heading angle from North
+        - gamma: Flight path angle
+        - v: Airspeed
+        
+        Controls are defined as:
+        - phi: roll angle
+        - theta: pitch angle
+        - Throttle command between 0 and 1
+        
+        """
+        self.dt_val: float = 0.1
+        self.mass_kg:float = 1.0
+        self.g: float = 9.81 
+        self.veloctiy_tau: float = 2.0
+        self.k_speed: float = 1.2
+        self.alpha: float = m.exp(-self.dt_val/self.veloctiy_tau)
+        self.beta  = self.k_speed * self.veloctiy_tau * \
+            (1 - m.exp(-self.dt_val/self.veloctiy_tau))
+        self.define_states()
+        self.define_controls()
+        self.define_state_space()
+        
+        self.state_info: Optional[np.ndarray] = None
+        self.data_handler: DataHandler = DataHandler()
+        
+    def define_states(self) -> None:
+        """
+        Define the symbolic state variables of the system in the NED frame
+        """
+        self.x : ca.SX = ca.SX.sym('x')
+        self.y : ca.SX = ca.SX.sym('y')
+        self.z : ca.SX = ca.SX.sym('z')
+        self.chi_x : ca.SX = ca.SX.sym('chi_x')
+        self.gamma : ca.SX = ca.SX.sym('gamma')
+        self.v : ca.SX = ca.SX.sym('v')
+        self.states: ca.SX = ca.vertcat(
+            self.x,
+            self.y,
+            self.z,
+            self.chi_x,
+            self.gamma,
+            self.v
+        )
+        
+        self.n_states: int = int(self.states.size()[0])
+    
+    def define_controls(self) -> None:
+        """
+        Define the symbolic control input variables for the system
+        """
+        self.u_phi: ca.SX = ca.SX.sym('u_phi')
+        self.u_theta: ca.SX = ca.SX.sym('u_theta')
+        self.u_throttle: ca.SX = ca.SX.sym('u_throttle')
+
+        self.controls: ca.SX = ca.vertcat(
+            self.u_phi,
+            self.u_theta,
+            self.u_throttle
+        )
+        self.n_controls: int = int(self.controls.size()[0])
+        
+    def compute_roll_ref(self, vel:float, u_chi:float) -> float:
+        """
+        Compute the roll reference angle based on the target position
+        https://aviation.stackexchange.com/questions/50078/what-is-the-maximum-angle-the-f-16-can-turn-in-x-seconds-while-flying-at-corne
+        https://discuss.ardupilot.org/t/coordinated-turn/88982
+        """
+
+        roll_ref = np.arctan2(vel*u_chi, self.g) 
+        return roll_ref
+
+    def define_state_space(self) -> None:
+        """
+        Define the state space of the system and construct the ODE function
+        """
+        # Airspeed dynamics (airspeed does not include wind)
+        self.x_dot : ca.SX = self.v * ca.cos(self.gamma) * ca.cos(self.chi_x)
+        self.y_dot : ca.SX = self.v * ca.cos(self.gamma) * ca.sin(self.chi_x)
+        self.z_dot : ca.SX = self.v * ca.sin(self.gamma)
+        self.chi_x_dot: ca.SX = (self.g/self.v) * ca.tan(self.u_phi)
+        self.gamma_dot: ca.SX = self.u_theta - self.gamma
+        # self.v_dot: ca.SX = (self.alpha * self.v) + \
+        #     (self.beta * self.u_throttle)
+        self.v_dot: ca.SX = self.v
+            
+        self.z_dot = ca.vertcat(
+            self.x_dot,
+            self.y_dot,
+            self.z_dot,
+            self.chi_x_dot,
+            self.gamma_dot,
+            self.v_dot
+        )
+        
+        # Define the ODE function: f(states, controls) -> state derivatives
+        self.function: ca.Function = ca.Function(
+            'f', [self.states, self.controls], [self.z_dot])
+        
+    def rk45(self, x: ca.SX, u: ca.SX, dt: float, use_numeric: bool = True,
+             wind=np.array([0, 0, 0]),
+             save_next_step: bool = False) -> np.ndarray:
+        """
+        Perform one integration step using the 4th order 
+        Runge-Kutta (RK45) method.
+
+        Args:
+            x (ca.SX): Current state.
+            u (ca.SX): Current control input.
+            dt (float): Integration time step.
+            use_numeric (bool): If True, returns a flattened numpy array; otherwise returns a CasADi expression.
+            wind (np.ndarray): Wind vector. Default is [0, 0, 0].
+            save_next_step (bool): If True, save the next state in the data handler.
+        Returns:
+            np.ndarray: Next state as a flattened numpy array if use_numeric is True.
+        """
+        # check if shape is correct
+        if x.shape[0] != self.n_states:
+            raise ValueError("input x does not match size of states: ",
+                             x.shape[0], self.n_states)
+
+        k1: ca.SX = self.function(x, u)
+        k2: ca.SX = self.function(x + dt / 2 * k1, u)
+        k3: ca.SX = self.function(x + dt / 2 * k2, u)
+        k4: ca.SX = self.function(x + dt * k3, u)
+        next_step: ca.SX = x + dt / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+
+        if use_numeric:
+            next_step_np: np.ndarray = np.array(next_step).flatten()
+            # Wrap the yaw angle to be within [-pi, pi]
+            yaw_idx: int = 3
+            next_step_np[yaw_idx] = (
+                next_step_np[yaw_idx] + np.pi) % (2 * np.pi) - np.pi
+            if save_next_step:
+                self.data_handler.update_states(next_step_np)
+                self.data_handler.update_controls(u)
+            return next_step_np
+        else:
+            if save_next_step:
+                self.data_handler.update_states(next_step)
+            return next_step
+        

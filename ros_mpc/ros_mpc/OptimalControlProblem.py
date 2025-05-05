@@ -250,7 +250,7 @@ class OptimalControlProblem(ABC):
     #     self.solver = ca.nlpsol('solver', 'ipopt', nlp_prob, solver_opts)
 
     def init_solver(self, cost_fn: ca.MX, solver_opts: Dict = None,
-        max_wall_time_sec: float = 0.25) -> None:
+        max_wall_time_sec: float = 0.1) -> None:
         print("Using ma27 solver")
         nlp_prob = {
             'f': cost_fn,
