@@ -9,7 +9,7 @@ from mavros.base import SENSOR_QOS
 from rclpy.node import Node
 from drone_interfaces.msg import Telem, CtlTraj
 from ros_mpc.models.MathModel import PlaneKinematicModel
-
+from ros_mpc.config import GOAL_X, GOAL_Y, GOAL_Z
 from ros_mpc.rotation_utils import (ned_to_enu_states,
                                     yaw_enu_to_ned,
                                     enu_to_ned_states,
@@ -333,7 +333,7 @@ def main(args=None):
 
     # now set your initial conditions for this case its the plane
     # x0: np.array = np.array([5, 5, 10, 0, 0, 0, 15])
-    xF: np.array = np.array([-100, -200, 60, 0, 0, 0, 15])
+    xF: np.array = np.array([GOAL_X, GOAL_Y, GOAL_Z, 0, 0, 0, 20])
     u_0: np.array = np.array([0, 0, 0, 15])
 
     closed_loop_sim: CloseLoopSim = CloseLoopSim(

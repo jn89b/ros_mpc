@@ -1,1 +1,3 @@
-GOAL_X = -100
+GOAL_X = -150
+GOAL_Y = -200
+GOAL_Z = 65

@@ -8,6 +8,7 @@ from mavros.base import SENSOR_QOS
 
 from rclpy.node import Node
 from drone_interfaces.msg import Telem, CtlTraj
+from ros_mpc.config import GOAL_X, GOAL_Y, GOAL_Z
 from ros_mpc.models.MathModel import PlaneKinematicModel
 
 from ros_mpc.rotation_utils import (ned_to_enu_states,
@@ -140,7 +141,7 @@ class OmniTraj(Node):
         traj_msg.roll = ned_states['phi'].tolist()
         yaw_cmd = controls['u_psi']
         ned_yaw_cmd =  (np.pi/2 - yaw_cmd)
-        dz:float = 60 - self.enu_state[2]
+        dz:float = GOAL_Z - self.enu_state[2]
         if self.dz_controller.prev_error is None:
             self.dz_controller.prev_error = 0.0
             
@@ -367,10 +368,10 @@ def main(args=None):
 
     # now set your initial conditions for this case its the plane
     # x0: np.array = np.array([5, 5, 10, 0, 0, 0, 15])
-    xF: np.array = np.array([-100, -200, 60, 0, 0, 0, 15])
+    xF: np.array = np.array([GOAL_X, GOAL_Y, GOAL_Z, 0, 0, 0, 20])
     u_0: np.array = np.array([0, 0, 0, 15])
     obstacle_list: List[Obstacle] = []
-    obstacle_list.append(Obstacle(center=[xF[0], xF[1], xF[2]], radius=5.0))
+    obstacle_list.append(Obstacle(center=[xF[0], xF[1], xF[2]], radius=8.0))
     
     plane_opt_control: SourceOptimalControl  = SourceOptimalControl(
         mpc_params=mpc_params, casadi_model=plane_model,

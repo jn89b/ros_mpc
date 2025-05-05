@@ -18,10 +18,12 @@ class SourceOptimalControl(OptimalControlProblem):
     def __init__(self,
                  mpc_params: MPCParams,
                  casadi_model: CasadiModel,
-                 obs_params: List[Obstacle]) -> None:
+                 obs_params: List[Obstacle],
+                 is_directional:bool=False) -> None:
         super().__init__(mpc_params,
                          casadi_model)
         self.obs_params: List[Obstacle] = obs_params
+        self.is_directional: bool = is_directional
         self.robot_radius: float = 3.0
         self.set_obstacle_avoidance_constraints()
 
@@ -140,10 +142,12 @@ class SourceOptimalControl(OptimalControlProblem):
             ratio_theta = (error_theta/effector_angle)**2
             ratio_phi = (error_phi/effector_angle)**2
             ratio_psi = (error_psi/effector_angle)**2
-
             # # mounting on the sides of the vehicle
-            effector_dmg = (5*ratio_distance + ((abs_dot_product) + \
-                ratio_psi + ratio_phi))
+            if self.is_directional:
+                effector_dmg = (5*ratio_distance )
+            else:
+                effector_dmg = (5*ratio_distance + ((abs_dot_product) + \
+                    ratio_psi + ratio_phi))
             
             # effector_dmg = dtarget**2 + abs_dot_product
             # this is time on target
