@@ -79,6 +79,15 @@ def get_relative_ned_yaw_cmd(
 
 
 class DirectionalTraj(Node):
+    """
+    Remember Loose Coupling: 
+        - We don't want to tie in MPC into this ROS2 node
+        - This node is responsible for:
+            - Publishing the trajectory 
+            - Subscribing to the aircraft state
+    - We will use our own libraries to compute the stuff
+    
+    """
     def __init__(self,
                  pub_freq: int = 100,
                  sub_freq: int = 100,
@@ -314,7 +323,6 @@ def main(args=None):
 
     plane_model: PlaneKinematicModel = build_model(
         control_limits_dict, state_limits_dict)
-
     # now we will set the MPC weights for the plane
     # 0 means we don't care about the specific state variable 1 means we care about it
     Q: np.diag = np.diag([1.0, 1.0, 1.0, 0, 0, 0, 0])
@@ -391,4 +399,6 @@ def main(args=None):
     return 
 
 if __name__ == "__main__":
+    x = 2 
+    y = 5
     main()
