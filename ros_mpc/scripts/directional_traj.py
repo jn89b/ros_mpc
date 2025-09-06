@@ -9,6 +9,7 @@ from mavros.base import SENSOR_QOS
 from rclpy.node import Node
 from drone_interfaces.msg import Telem, CtlTraj
 from ros_mpc.models.MathModel import PlaneKinematicModel
+from ros_mpc.aircraft_config import get_time_idx
 from ros_mpc.config import GOAL_X, GOAL_Y, GOAL_Z
 from ros_mpc.rotation_utils import (ned_to_enu_states,
                                     yaw_enu_to_ned,
@@ -20,9 +21,18 @@ from ros_mpc.rotation_utils import (ned_to_enu_states,
 from ros_mpc.PlaneOptControl import PlaneOptControl
 from optitraj.utils.data_container import MPCParams
 from optitraj.close_loop import CloseLoopSim
-from rl_ros.PID import FirstOrderFilter, PID
+from apmuas_ros.drone_math import geodetic_to_cartesian, convert_all_to_cartesian
 
+from rl_ros.PID import FirstOrderFilter, PID
+from mavros_msgs.srv import WaypointPull
+from mavros_msgs.msg import WaypointList
+from mavros_msgs.msg import HomePosition, State, WaypointReached
+from sensor_msgs.msg import NavSatFix
 from typing import List, Dict, Any, Tuple
+from dataclasses import dataclass, field
+  
+import threading
+import hashlib
 
 X_IDX = 0
 Y_IDX = 1
@@ -36,22 +46,6 @@ U_PHI_IDX = 0
 U_THETA_IDX = 1
 U_PSI_IDX = 2
 V_CMD_IDX = 3
-
-def yaw_enu_to_ned(yaw_enu: float) -> float:
-    """
-    Convert yaw angle from ENU to NED.
-
-    The conversion is symmetric:
-        yaw_ned = (pi/2 - yaw_enu) wrapped to [-pi, pi]
-
-    Parameters:
-        yaw_enu (float): Yaw angle in radians in the ENU frame.
-
-    Returns:
-        float: Yaw angle in radians in the NED frame.
-    """
-    yaw_ned = np.pi/2 - yaw_enu
-    return wrap_to_pi(yaw_ned)
 
 
 def wrap_to_pi(angle: float) -> float:
@@ -86,7 +80,12 @@ class DirectionalTraj(Node):
             - Publishing the trajectory 
             - Subscribing to the aircraft state
     - We will use our own libraries to compute the stuff
-    
+    - use this as a template for the other nodes
+    - This node will be used to:
+        - Subscribe to the aircraft state
+        - Publish the trajectory
+        - Convert between NED and ENU frames
+        - Handle waypoint pulling from MAVROS
     """
     def __init__(self,
                  pub_freq: int = 100,
@@ -100,14 +99,50 @@ class DirectionalTraj(Node):
         self.num_states = 7
         self.enu_state: np.array = np.array([np.nan]*self.num_states)
 
-        # self.sub_traj = self.create_subscription(
-        #     Telem, 'telem', self.subscribe_telem, 10)
+        # self._lock = threading.RLock()
+        self._init_timers()
+        self._pull_in_flight = False
+        self._last_pull_time = 0.0
+
+      # --- Home / origin & local converter ---
+        self.home_received = True
+        self.home_lat_dg: float = 0.0
+        self.home_lon_dg = float = 0.0
+        self.local_cart = None
+        self.origin_alt_msl = None  # to handle relative-alt frames
+        
+        # --- Path store (ENU) from mission waypoints ---
+        self.path_gps: List[Tuple[float, float, float]] = []  # list of (lat,lon,alt)
+        self.path_enu: List[Tuple[float, float, float]] = []  # list of (Ex,Ey,Ez)
+        self.wp_idx:int = 0         # current progress along path
+        self.lookahead_m:float = 25.0 # tune this
+
+        # Periodic repull until we get a non-empty mission
+        self._pull_timer = self.create_timer(1.0, self._maybe_pull_waypoints)
+        self.waypoint_client = self.create_client(WaypointPull, '/mavros/mission/pull')        
+        while not self.waypoint_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('Service not available, waiting...')
+        self.req = WaypointPull.Request()
+        self.future = self.waypoint_client.call_async(self.req)
+        
         self.dz_controller: PID = PID(
             kp=0.1, ki=0.0, kd=0.01,
             min_constraint=np.deg2rad(-12),
             max_constraint=np.deg2rad(10),
             use_derivative=True,
             dt = 0.025)
+        
+        # For Ardupilot when we query the waypoints 
+        # the first waypoint is the home position
+        # this will be used to index the commands
+        self.home_waypoint_idx: int = 0 
+        
+        self.sub = self.create_subscription(
+            WaypointList,
+            '/mavros/mission/waypoints',
+            self.waypoint_cb,
+            10
+        )
         self.state_sub = self.create_subscription(mavros.local_position.Odometry,
                                                   'mavros/local_position/odom',
                                                   self.mavros_state_callback,
@@ -119,6 +154,144 @@ class DirectionalTraj(Node):
         self.current_enu_controls: np.array = np.array(
             [np.nan]*self.num_controls)
 
+    def _init_timers(self)-> None:
+        """
+        Used to initialize timers for waypoint pulling and other periodic tasks
+        """
+        self._waiting_for_wps:bool = False
+        self._last_wp_hash = None
+        self._pull_timeout_s = 5.0
+        self._pull_started_at = 0.0
+        self._last_path_update = 0.0
+
+
+    def _cache_gps_waypoints(self, msg: WaypointList) -> List[Tuple[float, float, float]]:
+        """
+        Cache the waypoints from the message
+        Args:
+            msg (WaypointList): Waypoint list message
+        """
+        new_path: List[Tuple[float, float, float]] = []
+        for i, w in enumerate(msg.waypoints):
+            if i == self.home_waypoint_idx:
+                self.home_lat_dg = w.x_lat
+                self.home_lon_dg = w.y_long    
+                continue  # skip home waypoint. 
+            # check if gps coordinate is 0,0
+            if w.x_lat == 0.0 and w.y_long == 0.0:
+                self.get_logger().warn(f"Skipping invalid waypoint {i} with lat,lon=0,0")
+                continue                       
+            lat, lon, alt = float(w.x_lat), float(w.y_long), float(w.z_alt)
+            print(f"Waypoint: lat={lat}, lon={lon}, alt={alt}, frame={w.frame}, command={w.command}")
+            new_path.append((lat, lon, alt))
+        
+        return new_path
+
+    def _create_cartesian_waypoints(self, 
+            gps_waypoints: List[Tuple[float, float, float]],
+            minimum_altitude_m:float = 50,
+            max_lat_range:float=1000) -> List[Tuple[float, float, float]]:
+        """
+        Returns a list of Cartesian coordinates (x, y, z) relative to the home position.
+        """
+        if self.home_lat_dg == None or self.home_lon_dg == None:
+            self.get_logger().warn("Home position not set; cannot convert waypoints.")
+            return []
+        
+        cartesian_path: List[Tuple[float, float, float]] = []
+        for i, (wp) in enumerate(gps_waypoints):
+            lat, lon, alt = wp
+            x, y = geodetic_to_cartesian(
+                self.home_lat_dg, self.home_lon_dg, lat, lon)
+            print(f"Cartesian Waypoint {i}: x={x:.1f}, y={y:.1f}, alt={alt:.1f}")
+            if abs(x) > max_lat_range or abs(y) > max_lat_range:
+                self.get_logger().warn(f"Waypoint {i}, {wp} too far from home; skipping.")
+                continue
+            # this is a failsafe to ensure we don't go below a certain altitude
+            if alt < minimum_altitude_m:
+                alt = minimum_altitude_m
+            cartesian_path.append((x, y, alt)) 
+        
+        return cartesian_path
+
+    def waypoint_cb(self, msg: WaypointList) -> None:
+        # QoS should be TRANSIENT_LOCAL so you get latched updates
+        new_hash = self._hash_waypoints(msg)
+        if new_hash == self._last_wp_hash:
+            print("Duplicate waypoint message received; ignoring.")
+            # Duplicate (e.g., first latched read or same mission) — ignore
+            if self._waiting_for_wps:
+                # We initiated a pull but cache didn’t change; let timer retry via timeout
+                pass
+            return
+        
+        self._last_wp_hash = new_hash
+        self.path_gps: List[Tuple[float, float, float]] = self._cache_gps_waypoints(msg)
+        print("GPS Waypoints: ", self.path_gps)
+        self.path_enu: List[Tuple[float, float, float]] = self._create_cartesian_waypoints(self.path_gps)
+        self.wp_idx = 0
+        self._waiting_for_wps = False   # <- we got a fresh mission
+        self._last_path_update = time.time()
+        self.get_logger().info(f"Waypoints updated: {len(self.path_enu)} points.")
+    
+    def _hash_waypoints(self, msg: WaypointList) -> str:
+        """
+        We will use this to hash the waypoints to see if they have changed
+        and we will only update the path if they have changed
+        This is to avoid unnecessary path updates
+        Args:
+            msg (WaypointList): Waypoint list message
+        Returns:
+            str: Hash of the waypoints
+        """
+        h = hashlib.sha1()
+        for w in msg.waypoints:
+            h.update(f"{w.frame},{w.command},{w.x_lat:.8f},{w.y_long:.8f},{w.z_alt:.3f}".encode())
+        return h.hexdigest()
+
+    def _maybe_pull_waypoints(self) -> None:
+        """
+        We will use this to periodically pull waypoints if we don't have any
+        or if we are waiting for a pull to complete
+        """
+        now = time.time()
+        # If a pull is already in flight and taking too long, time it out
+        if self._waiting_for_wps and (now - self._pull_started_at) > self._pull_timeout_s:
+            self.get_logger().warn("Mission pull timed out; retrying.")
+            self._waiting_for_wps = False  # allow a new attempt
+
+        # Only pull if we have no path yet OR we're explicitly waiting and timed out, OR you detect staleness elsewhere
+        if self._waiting_for_wps:
+            return
+
+        # Trigger pull
+        if self.waypoint_client.service_is_ready():
+            self._waiting_for_wps = True
+            self._pull_started_at = now
+            fut = self.waypoint_client.call_async(WaypointPull.Request())
+
+            def _done_cb(f):
+                try:
+                    res = f.result()
+                    self.get_logger().info(f"pull success={getattr(res,'success',True)} count={getattr(res,'wp_received',-1)}")
+                except Exception as e:
+                    self.get_logger().warn(f"pull exception: {e}")
+                    self._waiting_for_wps = False  # allow retry
+            fut.add_done_callback(_done_cb)
+            
+
+    def _home_cb(self, msg: HomePosition) -> None:
+        # with self._lock:
+        lat0 = msg.geo.latitude 
+        lon0 = msg.geo.longitude 
+        alt0 = msg.geo.altitude
+        print("Home lat, lon, alt: ", lat0, lon0, alt0)
+        # self.local_cart = LocalCartesian(lat0, lon0, alt0)
+        self.origin_alt_msl = alt0
+        self.home_received = True
+        self.get_logger().info("Home set...")
+        self._pull_in_flight = False
+        
     def publish_traj(self,
                      solution: Dict[str, Any],
                      delta_sol_time: float,
@@ -143,7 +316,7 @@ class DirectionalTraj(Node):
         traj_msg.y = ned_states['y'].tolist()
         traj_msg.z = ned_states['z'].tolist()
         traj_msg.roll = ned_states['phi'].tolist()
-        dz:float = 65.0 - self.enu_state[2]
+        dz:float = GOAL_Z - self.enu_state[2]
         if self.dz_controller.prev_error is None:
             self.dz_controller.prev_error = 0.0
             
@@ -153,7 +326,8 @@ class DirectionalTraj(Node):
             dt=0.05
         )
         pitch_cmd = np.clip(pitch_cmd, -np.deg2rad(10), np.deg2rad(10))
-        traj_msg.pitch = [pitch_cmd, pitch_cmd, pitch_cmd, pitch_cmd]
+        pitch_array = np.ones(len(ned_states['theta'])) * pitch_cmd
+        traj_msg.pitch = pitch_array.tolist()
         current_ned_yaw: float = yaw_enu_to_ned(self.enu_state[5])
         # traj_msg.yaw = ned_states['psi'].tolist()
         ned_yaw = ned_states['psi'].tolist()
@@ -171,16 +345,13 @@ class DirectionalTraj(Node):
         max_thrust:float = 0.7
         thrust_cmd:float = np.clip(
             airspeed_cmd, min_thrust, max_thrust)
-        traj_msg.thrust = [thrust_cmd,
-                           thrust_cmd,
-                           thrust_cmd,
-                           thrust_cmd] 
+        thrust_cmd = np.ones(len(ned_states['v'])) * thrust_cmd
+        traj_msg.thrust = thrust_cmd.tolist() 
 
         phi_cmd_rad: float = states['phi'][time_idx]
         theta_cmd_rad: float = states['theta'][time_idx]
         psi_cmd_rad: float = states['psi'][time_idx]
         vel_cmd: float = states['v'][time_idx]
-
 
         self.pub_traj.publish(traj_msg)
         self.update_controls(
@@ -243,6 +414,7 @@ class DirectionalTraj(Node):
         # get magnitude of velocity
         self.enu_state[6] = np.sqrt(vx**2 + vy**2 + vz**2)
 
+
 def build_model(control_limits: Dict[str, Dict[str, float]],
                 state_limits: Dict[str, Dict[str, float]]) -> PlaneKinematicModel:
     model: PlaneKinematicModel = PlaneKinematicModel()
@@ -274,30 +446,6 @@ def unpack_optimal_control_results(
     controls: Dict[str, np.array] = optimal_control_results['controls']
 
     return states, controls
-
-
-def get_time_idx(dt: float, solution_time: float,
-                 idx_buffer: int = 0) -> int:
-    """
-    Args:
-        dt (float): time step
-        solution_time (float): time it took to solve the problem
-        idx_buffer (int): buffer for the index
-    Returns:
-        int: index for the time step
-
-    Returns the index of the time step that is closest to the solution time
-    used to buffer the commands sent to the drone
-    """
-    time_rounded = round(solution_time, 1)
-
-    if time_rounded <= 1:
-        time_rounded = 1
-
-    ctrl_idx = dt/time_rounded
-    idx = int(round(ctrl_idx)) + idx_buffer
-
-    return idx
 
 
 def main(args=None):
@@ -383,11 +531,9 @@ def main(args=None):
                 x0=traj_node.enu_state,
                 u0=traj_node.current_enu_controls)
             delta_sol_time: float = time.time() - start_sol_time
-            # distance
             distance = np.linalg.norm(
                 np.array(traj_node.enu_state[0:2]) - np.array(xF[0:2]))
-            print("Distance: ", distance)
-            # publish the trajectory
+            # print("Distance: ", distance)
             traj_node.publish_traj(solution, delta_sol_time,
                                 idx_buffer=2)
         except KeyboardInterrupt:
@@ -399,6 +545,4 @@ def main(args=None):
     return 
 
 if __name__ == "__main__":
-    x = 2 
-    y = 5
     main()

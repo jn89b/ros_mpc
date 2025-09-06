@@ -205,3 +205,32 @@ state_constraints_load = {
     'v_cmd_min':   10.0,
     'v_cmd_max':   20.0
 }
+
+
+def get_time_idx(dt: float, solution_time: float,
+                 idx_buffer: int = 0) -> int:
+    """
+    Args:
+        dt (float): time step
+        solution_time (float): time it took to solve the problem
+        idx_buffer (int): buffer for the index
+    Returns:
+        int: index for the time step
+
+    Returns the index of the time step that is closest to the solution time
+    used to buffer the commands sent to the drone
+    """
+    time_rounded = round(solution_time, 1)
+
+    if time_rounded <= 1:
+        time_rounded = 1
+
+    ctrl_idx = solution_time / dt
+    ctrl_idx = round(ctrl_idx, 1) 
+    idx = int(round(ctrl_idx)) + idx_buffer
+    max_horizon:int = 15
+    if idx < 0:
+        idx = 0
+    if idx > max_horizon - 1:
+        idx = max_horizon - 1
+    return idx
