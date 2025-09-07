@@ -28,6 +28,7 @@ from mavros_msgs.srv import WaypointPull
 from mavros_msgs.msg import WaypointList
 from mavros_msgs.msg import HomePosition, State, WaypointReached
 from typing import List, Dict, Any, Tuple
+
   
 import threading
 import hashlib
@@ -105,7 +106,6 @@ class DirectionalTraj(Node):
         # intialize an array of nan
         self.num_states = 7
         self.enu_state: np.array = np.array([np.nan]*self.num_states)
-
         # self._lock = threading.RLock()
         self._init_timers()
         self._pull_in_flight = False
@@ -689,7 +689,8 @@ def main(args=None):
                 
             # Build xF (ENU) for the MPC: [x,y,z,phi,theta,psi,v]
             xf_speed = 20.0
-            xF = np.array([subgoal[0], subgoal[1], subgoal[2], 0.0, 0.0, 0.0, xf_speed], dtype=float)
+            xF = np.array([subgoal[0], subgoal[1], subgoal[2], 
+                           0.0, 0.0, 0.0, xf_speed], dtype=float)
 
             # Solve one MPC step
             start_sol_time: float = time.time()

@@ -572,4 +572,3 @@ def unpack_optimal_control_results(
     controls: Dict[str, np.array] = optimal_control_results['controls']
 
     return states, controls
-

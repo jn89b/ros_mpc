@@ -23,7 +23,7 @@ XF_SPEED = 20.0
 POST_WRAP_GUARD_S = 1.0
 
 # Waypoints-as-obstacles
-WP_OBS_RADIUS = 20.0        # keep-out radius (m) for each waypoint obstacle
+WP_OBS_RADIUS = 30.0        # keep-out radius (m) for each waypoint obstacle
 EXCLUDE_ACTIVE_WP = True    # exclude the active waypoint as an obstacle
 EXCLUDE_NEIGHBORS = 1       # also exclude +/- this many neighbors (wrap-safe)
 
@@ -78,17 +78,17 @@ def _advance_wp_with_wrap(traj_node: TrajNode) -> None:
 
     if traj_node.wp_idx < last_idx:
         traj_node.wp_idx += 1
-        traj_node.get_logger().info(f"[omni_traj] Advancing to waypoint idx={traj_node.wp_idx}")
+        # traj_node.get_logger().info(f"[omni_traj] Advancing to waypoint idx={traj_node.wp_idx}")
         return
 
     # At last waypoint
     if getattr(traj_node, "loop_mission", True):
         traj_node.wp_idx = 0
         traj_node.lap_count = getattr(traj_node, "lap_count", 0) + 1
-        traj_node.get_logger().info(f"[omni_traj] Wrapped to first waypoint (lap {traj_node.lap_count}).")
+        # traj_node.get_logger().info(f"[omni_traj] Wrapped to first waypoint (lap {traj_node.lap_count}).")
         if getattr(traj_node, "max_laps", None) is not None and traj_node.lap_count >= traj_node.max_laps:
             traj_node.loop_mission = False
-            traj_node.get_logger().info("[omni_traj] Reached max_laps; disabling looping.")
+            # traj_node.get_logger().info("[omni_traj] Reached max_laps; disabling looping.")
     else:
         traj_node.get_logger().info("[omni_traj] At last waypoint; looping disabled. Holding last.")
 
