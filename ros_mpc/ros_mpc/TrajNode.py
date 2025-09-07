@@ -74,30 +74,16 @@ def get_relative_ned_yaw_cmd(
     return wrap_to_pi(yaw_cmd)
 
 
-
-class DirectionalTraj(Node):
-    """
-    Remember Loose Coupling: 
-        - We don't want to tie in MPC into this ROS2 node
-        - This node is responsible for:
-            - Publishing the trajectory 
-            - Subscribing to the aircraft state
-    - We will use our own libraries to compute the stuff
-    - use this as a template for the other nodes
-    - This node will be used to:
-        - Subscribe to the aircraft state
-        - Publish the trajectory
-        - Convert between NED and ENU frames
-        - Handle waypoint pulling from MAVROS
-    """
+class TrajNode(Node):
     def __init__(self,
+                 node_name: str = 'directional_traj',
                  pub_freq: int = 100,
                  sub_freq: int = 100,
                  XY_reach_m: float = XY_REACH_M,
                  Z_reach_m: float = Z_REACH_M,
                  save_states: bool = False,
                  sub_to_mavros: bool = True):
-        super().__init__('directional_traj')
+        super().__init__(node_name)
         self.pub_freq = pub_freq
         self.sub_freq = sub_freq
         self.XY_REACH_M: float = XY_reach_m
@@ -515,8 +501,6 @@ class DirectionalTraj(Node):
             return False
         p_enu = self.enu_state[X_IDX:Z_IDX+1]
         d_vec   = p_enu- wp
-        d_xy    = np.linalg.norm(d_vec[:Z_IDX])
-        dz      = abs(d_vec[Z_IDX])
         # near    = (d_xy <= self.XY_REACH_M) and (dz <= self.Z_REACH_M)
         distance = np.linalg.norm(d_vec)
         total_reach = np.sqrt(self.XY_REACH_M**2 + self.Z_REACH_M**2)
@@ -589,130 +573,3 @@ def unpack_optimal_control_results(
 
     return states, controls
 
-
-# Simple fail-safe publisher using a neutral/hold trajectory
-def _publish_hold(traj_node):
-    if np.any(np.isnan(traj_node.enu_state)):
-        return  # no valid state yet
-    from copy import deepcopy
-    cur_enu = deepcopy(traj_node.enu_state)
-    cur_ned = enu_to_ned_states(cur_enu)
-    hold = CtlTraj()
-    hold.idx   = 0
-    hold.x     = [cur_ned[0]] * 4
-    hold.y     = [cur_ned[1]] * 4
-    hold.z     = [cur_ned[2]] * 4
-    hold.roll  = [0.0] * 4
-    hold.pitch = [0.0] * 4
-    hold.yaw   = [0.0] * 4    # relative yaw = 0
-    hold.vx    = [20.0] * 4   # trim speed
-    hold.thrust= [0.55] * 4   # tune for trim airspeed
-    traj_node.pub_traj.publish(hold)
-
-
-def main(args=None):
-    rclpy.init(args=args)
-    traj_node = DirectionalTraj()
-    rclpy.spin_once(traj_node)
-
-    control_limits_dict: Dict[str, Dict[str, float]] = {
-        'u_phi': {'min': -np.deg2rad(45), 'max': np.deg2rad(45)},
-        'u_theta': {'min': -np.deg2rad(10), 'max': np.deg2rad(10)},
-        'u_psi': {'min': -np.deg2rad(180), 'max': np.deg2rad(180)},
-        'v_cmd': {'min': 10.0, 'max': 30.0}
-    }
-    state_limits_dict: Dict[str, Dict[str, float]] = {
-        'x': {'min': -np.inf, 'max': np.inf},
-        'y': {'min': -np.inf, 'max': np.inf},
-        'z': {'min': 50, 'max': 150},
-        'phi': {'min': -np.deg2rad(45), 'max': np.deg2rad(45)},
-        'theta': {'min': -np.deg2rad(15), 'max': np.deg2rad(15)},
-        'psi': {'min': -np.pi, 'max': np.pi},
-        'v': {'min': 18, 'max': 30.0}
-    }
-
-    plane_model: PlaneKinematicModel = build_model(
-        control_limits_dict, state_limits_dict)
-
-    Q: np.diag = np.diag([1.0, 1.0, 1.0, 0, 0, 0, 0])
-    R: np.diag = np.diag([0.25, 0.25, 0.25, 1])
-
-    mpc_params: MPCParams = MPCParams(Q=Q, R=R, N=15, dt=0.1)
-    plane_opt_control: PlaneOptControl = PlaneOptControl(
-        mpc_params=mpc_params, casadi_model=plane_model)
-
-    u_0: np.array = np.array([0, 0, 0, 15])
-
-    closed_loop_sim: CloseLoopSim = CloseLoopSim(
-        optimizer=plane_opt_control,
-        x_init=traj_node.enu_state,
-        x_final=np.zeros(7),   # will be overwritten each tick
-        print_every=1000,
-        u0=u_0,
-        N=100
-    )
-    
-    #TODO: The waypoints and subgoals are complelety different need to fix this 
-
-    while rclpy.ok():
-        try:
-            rclpy.spin_once(traj_node, timeout_sec=0.1)
-            # Require a valid state
-            if np.any(np.isnan(traj_node.enu_state)):
-                _publish_hold(traj_node)
-                continue
-
-            # Require a path; if none yet, hold
-            if len(traj_node.path_enu) == 0:
-                _publish_hold(traj_node)
-                continue
-
-            # Advance waypoint index if reached/passed (bounded in case of stacked WPs)
-            bumps = 0
-            max_bumps = 10
-            
-            # These helpers are assumed to exist on the node (as previously added):
-            #   _reached_wp(p_enu) -> bool
-            #   _advance_wp() -> None
-            while hasattr(traj_node, "_reached_wp") and hasattr(traj_node, "_advance_wp") \
-                  and traj_node._reached_wp() and bumps < max_bumps:
-                traj_node._advance_wp()
-                bumps += 1
-
-            active_wp = traj_node._active_wp()
-            if active_wp is None:
-                traj_node.get_logger().info("No active waypoint; holding.")
-                _publish_hold(traj_node)
-                continue
-            
-            subgoal = active_wp.copy()
-                
-            # Build xF (ENU) for the MPC: [x,y,z,phi,theta,psi,v]
-            xf_speed = 20.0
-            xF = np.array([subgoal[0], subgoal[1], subgoal[2], 0.0, 0.0, 0.0, xf_speed], dtype=float)
-
-            # Solve one MPC step
-            start_sol_time: float = time.time()
-            closed_loop_sim.x_init = traj_node.enu_state
-            solution: Dict[str, Any] = closed_loop_sim.run_single_step(
-                xF=xF,
-                x0=traj_node.enu_state,
-                u0=traj_node.current_enu_controls
-            )
-            
-            delta_sol_time: float = time.time() - start_sol_time
-            distance = np.linalg.norm(traj_node.enu_state[0:2] - xF[0:2])
-            traj_node.get_logger().info(f"Dist to subgoal: {distance:.1f} m, Sol time: {delta_sol_time*1000:.1f} ms")   
-            # Publish trajectory computed from solution
-            traj_node.publish_traj(solution, xF[Z_IDX], delta_sol_time, idx_buffer=2)
-
-        except KeyboardInterrupt:
-            break
-
-    traj_node.destroy_node()
-    rclpy.shutdown()
-    return
-
-
-if __name__ == "__main__":
-    main()

@@ -1,434 +1,242 @@
 #!/usr/bin/env python3
 import rclpy
-import casadi as ca
 import numpy as np
 import time
-import mavros
-from mavros.base import SENSOR_QOS
+import mavros  # noqa: F401 (kept in case you extend with MAVROS topics)
+from mavros.base import SENSOR_QOS  # noqa: F401
 
-from rclpy.node import Node
-from drone_interfaces.msg import Telem, CtlTraj
-from ros_mpc.config import GOAL_X, GOAL_Y, GOAL_Z
+from typing import List, Dict, Any, Tuple, Optional
+from dataclasses import dataclass
+
 from ros_mpc.models.MathModel import PlaneKinematicModel
-
-from ros_mpc.rotation_utils import (ned_to_enu_states,
-                                    yaw_enu_to_ned,
-                                    enu_to_ned_states,
-                                    euler_from_quaternion,
-                                    convert_enu_state_sol_to_ned)
-from ros_mpc.SourceOptimalControl import SourceOptimalControl
-from optitraj.mpc.PlaneOptControl import PlaneOptControl
+from ros_mpc.TrajNode import TrajNode, build_model
 from optitraj.utils.data_container import MPCParams
 from optitraj.close_loop import CloseLoopSim
-from dataclasses import dataclass
-from typing import List, Dict, Any, Tuple
-from rl_ros.PID import FirstOrderFilter, PID
+from ros_mpc.SourceOptimalControl import SourceOptimalControl
 
-X_IDX = 0
-Y_IDX = 1
-Z_IDX = 2
-PHI_IDX = 3
-THETA_IDX = 4
-PSI_IDX = 5
-V_IDX = 6
+# =================== Config ===================
 
-U_PHI_IDX = 0
-U_THETA_IDX = 1
-U_PSI_IDX = 2
-V_CMD_IDX = 3
+# Target speed at waypoint
+XF_SPEED = 20.0
 
-def yaw_enu_to_ned(yaw_enu: float) -> float:
-    """
-    Convert yaw angle from ENU to NED.
+# After wrapping to WP0, ignore reach checks briefly to avoid instant re-advance
+POST_WRAP_GUARD_S = 1.0
 
-    The conversion is symmetric:
-        yaw_ned = (pi/2 - yaw_enu) wrapped to [-pi, pi]
+# Waypoints-as-obstacles
+WP_OBS_RADIUS = 20.0        # keep-out radius (m) for each waypoint obstacle
+EXCLUDE_ACTIVE_WP = True    # exclude the active waypoint as an obstacle
+EXCLUDE_NEIGHBORS = 1       # also exclude +/- this many neighbors (wrap-safe)
 
-    Parameters:
-        yaw_enu (float): Yaw angle in radians in the ENU frame.
-
-    Returns:
-        float: Yaw angle in radians in the NED frame.
-    """
-    yaw_ned = np.pi/2 - yaw_enu
-    return wrap_to_pi(yaw_ned)
-
-
-def wrap_to_pi(angle: float) -> float:
-    """
-    Wrap an angle in radians to the range [-pi, pi].
-
-    Parameters:
-        angle (float): Angle in radians.
-
-    Returns:
-        float: Angle wrapped to [-pi, pi].
-    """
-    return (angle + np.pi) % (2 * np.pi) - np.pi
-
-
-def get_relative_ned_yaw_cmd(
-        current_ned_yaw: float,
-        inert_ned_yaw_cmd: float) -> float:
-
-    yaw_cmd: float = inert_ned_yaw_cmd - current_ned_yaw
-
-    # wrap the angle to [-pi, pi]
-    return wrap_to_pi(yaw_cmd)
-
+# =================== Obstacle model ===================
 
 @dataclass
 class Obstacle:
-    center: Tuple[float, float]
-    radius: float
+    center: Tuple[float, float]   # ENU (E, N)
+    radius: float                 # meters
 
-class OmniTraj(Node):
-    def __init__(self,
-                 pub_freq: int = 100,
-                 sub_freq: int = 100,
-                 save_states: bool = False,
-                 sub_to_mavros: bool = True):
-        super().__init__('directional_traj')
-        self.pub_freq = pub_freq
-        self.sub_freq = sub_freq
-        # intialize an array of nan
-        self.num_states = 7
-        self.enu_state: np.array = np.array([np.nan]*self.num_states)
+# =================== Helpers ===================
 
-        # self.sub_traj = self.create_subscription(
-        #     Telem, 'telem', self.subscribe_telem, 10)
+def _active_wp(traj_node: TrajNode) -> Optional[np.ndarray]:
+    """Returns active waypoint ENU [E,N,U] or None."""
+    if not hasattr(traj_node, "path_enu") or len(traj_node.path_enu) == 0:
+        return None
+    if traj_node.wp_idx >= len(traj_node.path_enu):
+        return None
+    E, N, U = traj_node.path_enu[traj_node.wp_idx]
+    return np.array([E, N, U], dtype=float)
 
-        self.dz_controller: PID = PID(
-            kp=0.1, ki=0.0, kd=0.01,
-            min_constraint=np.deg2rad(-12),
-            max_constraint=np.deg2rad(10),
-            use_derivative=True,
-            dt = 0.025)
-        self.state_sub = self.create_subscription(mavros.local_position.Odometry,
-                                                  'mavros/local_position/odom',
-                                                  self.mavros_state_callback,
-                                                  qos_profile=SENSOR_QOS)
-        self.pub_traj = self.create_publisher(
-            CtlTraj, '/trajectory', 10)
-
-        self.num_controls: int = 4
-        self.current_enu_controls: np.array = np.array(
-            [np.nan]*self.num_controls)
-
-    def publish_traj(self,
-                     solution: Dict[str, Any],
-                     delta_sol_time: float,
-                     idx_buffer:int = 0) -> None:
-        """
-        Trajectory published must be in NED frame
-        Yaw control must be sent as relative NED command
-        """
-        # Solutions unpacked are in ENU frame
-        # we need to convert to NED frame
-        time_idx: int = get_time_idx(0.1, delta_sol_time,
-                                     idx_buffer=idx_buffer)
-
-        states, controls = unpack_optimal_control_results(solution)
-        states: Dict[str, np.array] = states
-        controls: Dict[str, np.array] = controls
-        ned_states: Dict[str, np.array] = convert_enu_state_sol_to_ned(states)
-        
-        traj_msg: CtlTraj = CtlTraj()
-        traj_msg.idx = time_idx
-        traj_msg.x = ned_states['x'].tolist()
-        traj_msg.y = ned_states['y'].tolist()
-        traj_msg.z = ned_states['z'].tolist()
-        traj_msg.roll = ned_states['phi'].tolist()
-        yaw_cmd = controls['u_psi']
-        ned_yaw_cmd =  (np.pi/2 - yaw_cmd)
-        dz:float = GOAL_Z - self.enu_state[2]
-        if self.dz_controller.prev_error is None:
-            self.dz_controller.prev_error = 0.0
-            
-        pitch_cmd = self.dz_controller.compute(
-            setpoint=dz,
-            current_value=0.0,
-            dt=0.05
-        )
-        pitch_cmd = np.clip(pitch_cmd, -np.deg2rad(10), np.deg2rad(10))
-        traj_msg.pitch = [pitch_cmd, pitch_cmd, pitch_cmd, pitch_cmd]
-        current_ned_yaw: float = yaw_enu_to_ned(self.enu_state[5])
-        # traj_msg.yaw = ned_states['psi'].tolist()
-        ned_yaw = ned_states['psi'].tolist()
-        ned_yaw_cmd = [get_relative_ned_yaw_cmd(
-            current_ned_yaw, ned_yaw[i]) for i in range(len(ned_yaw))]
-        
-        # ned_yaw_cmd = [get_relative_ned_yaw_cmd(
-        #     current_ned_yaw, ned_yaw_cmd[i]) for i in range(len(ned_yaw_cmd))]
-        traj_msg.yaw = ned_yaw_cmd
-        
-        traj_msg.vx = ned_states['v'].tolist()
-        traj_msg.idx = time_idx + 1
-
-        airspeed_error = states['v'][time_idx] - self.enu_state[6]        
-        kp_airspeed:float = 0.25
-        airspeed_cmd:float = kp_airspeed * airspeed_error
-        min_thrust:float = 0.4
-        max_thrust:float = 0.7
-        thrust_cmd:float = np.clip(
-            airspeed_cmd, min_thrust, max_thrust)
-        traj_msg.thrust = [thrust_cmd,
-                           thrust_cmd,
-                           thrust_cmd,
-                           thrust_cmd] 
-        phi_cmd_rad: float = states['phi'][time_idx]
-        theta_cmd_rad: float = states['theta'][time_idx]
-        psi_cmd_rad: float = states['psi'][time_idx]
-        vel_cmd: float = states['v'][time_idx]
-
-        self.pub_traj.publish(traj_msg)
-        self.update_controls(
-            phi_cmd_rad=phi_cmd_rad,
-            theta_cmd_rad=theta_cmd_rad,
-            psi_cmd_float=psi_cmd_rad,
-            vel_cmd=vel_cmd
-        )
-
-    def update_controls(self,
-                        phi_cmd_rad: float,
-                        theta_cmd_rad: float,
-                        psi_cmd_float: float,
-                        vel_cmd: float) -> None:
-        """
-        For the MPC controller we are sending the following commands
-        roll, pitch, yaw (global), and airspeed commands
-        Coordinate frame is ENU
-        """
-        self.current_enu_controls[U_PHI_IDX] = phi_cmd_rad
-        self.current_enu_controls[U_THETA_IDX] = theta_cmd_rad
-        self.current_enu_controls[U_PSI_IDX] = psi_cmd_float
-        self.current_enu_controls[V_CMD_IDX] = vel_cmd
-
-    def subscribe_telem(self, ned_msg: Telem) -> None:
-        """
-        State callbacks will be in NED frame
-        need to convert to ENU frame
-        """
-        ned_state: np.array = np.array([
-            ned_msg.x, ned_msg.y, ned_msg.z,
-            ned_msg.roll, ned_msg.pitch, ned_msg.yaw,
-            np.sqrt(ned_msg.vx**2 + ned_msg.vy**2 + ned_msg.vz**2)])
-
-        self.enu_state: np.array = ned_to_enu_states(ned_state)
-
-    def mavros_state_callback(self, msg: mavros.local_position.Odometry) -> None:
-        """
-        Converts NED to ENU and publishes the trajectory
-          """
-        self.enu_state[0] = msg.pose.pose.position.x
-        self.enu_state[1] = msg.pose.pose.position.y
-        self.enu_state[2] = msg.pose.pose.position.z
-
-        # quaternion attitudes
-        qx = msg.pose.pose.orientation.x
-        qy = msg.pose.pose.orientation.y
-        qz = msg.pose.pose.orientation.z
-        qw = msg.pose.pose.orientation.w
-        roll, pitch, yaw = euler_from_quaternion(
-            qx, qy, qz, qw)
-
-        self.enu_state[3] = roll
-        self.enu_state[4] = pitch
-        self.enu_state[5] = yaw  # (yaw+ (2*np.pi) ) % (2*np.pi);
-
-        vx = msg.twist.twist.linear.x
-        vy = msg.twist.twist.linear.y
-        vz = msg.twist.twist.linear.z
-        # get magnitude of velocity
-        self.enu_state[6] = np.sqrt(vx**2 + vy**2 + vz**2)
-
-def build_model(control_limits: Dict[str, Dict[str, float]],
-                state_limits: Dict[str, Dict[str, float]]) -> PlaneKinematicModel:
-    model: PlaneKinematicModel = PlaneKinematicModel()
-    model.set_control_limits(control_limits)
-    model.set_state_limits(state_limits)
-
-    return model
-
-
-def build_control_problem(mpc_params: MPCParams, casadi_model: PlaneKinematicModel) -> PlaneOptControl:
-    plane_opt_control: PlaneOptControl = PlaneOptControl(
-        mpc_params=mpc_params, casadi_model=casadi_model)
-    return plane_opt_control
-
-
-def custom_stop_criteria(state: np.ndarray,
-                         final_state: np.ndarray) -> bool:
-    distance = np.linalg.norm(state[0:2] - final_state[0:2])
-    if distance < 5.0:
-        return True
-
-
-def unpack_optimal_control_results(
-        optimal_control_results: Dict[str, Any]) -> Tuple[Dict[str, np.array], Dict[str, np.array]]:
+def _reached_wp(traj_node: TrajNode, xy_reach: float = 15.0, z_reach: float = 10.0) -> bool:
     """
-    Unpack the results of the optimal control problem
+    Reached if within cylinder: XY <= xy_reach AND |Z| <= z_reach,
+    OR passed along-track relative to previous waypoint.
     """
-    states: Dict[str, np.array] = optimal_control_results['states']
-    controls: Dict[str, np.array] = optimal_control_results['controls']
+    wp = _active_wp(traj_node)
+    if wp is None or np.any(np.isnan(traj_node.enu_state[:3])):
+        return False
 
-    return states, controls
+    p = traj_node.enu_state[:3]
+    d = p - wp
+    near = (np.linalg.norm(d[:2]) <= xy_reach) and (abs(d[2]) <= z_reach)
 
+    # along-track check
+    if traj_node.wp_idx > 0:
+        prev = np.array(traj_node.path_enu[traj_node.wp_idx - 1], dtype=float)
+        seg = wp - prev
+        passed = np.dot(p - wp, seg) > 0.0
+    else:
+        passed = False
+    return near or passed
 
-def get_time_idx(dt: float, solution_time: float,
-                 idx_buffer: int = 0) -> int:
+def _advance_wp_with_wrap(traj_node: TrajNode) -> None:
     """
-    Args:
-        dt (float): time step
-        solution_time (float): time it took to solve the problem
-        idx_buffer (int): buffer for the index
-    Returns:
-        int: index for the time step
-
-    Returns the index of the time step that is closest to the solution time
-    used to buffer the commands sent to the drone
+    Advance to next waypoint; wrap to 0 if at end and looping is enabled
+    (TrajNode already has loop_mission, lap_count, max_laps fields).
     """
-    time_rounded = round(solution_time, 1)
+    if len(traj_node.path_enu) == 0:
+        return
+    last_idx = len(traj_node.path_enu) - 1
 
-    if time_rounded <= 1:
-        time_rounded = 1
+    if traj_node.wp_idx < last_idx:
+        traj_node.wp_idx += 1
+        traj_node.get_logger().info(f"[omni_traj] Advancing to waypoint idx={traj_node.wp_idx}")
+        return
 
-    ctrl_idx = dt/time_rounded
-    idx = int(round(ctrl_idx)) + idx_buffer
+    # At last waypoint
+    if getattr(traj_node, "loop_mission", True):
+        traj_node.wp_idx = 0
+        traj_node.lap_count = getattr(traj_node, "lap_count", 0) + 1
+        traj_node.get_logger().info(f"[omni_traj] Wrapped to first waypoint (lap {traj_node.lap_count}).")
+        if getattr(traj_node, "max_laps", None) is not None and traj_node.lap_count >= traj_node.max_laps:
+            traj_node.loop_mission = False
+            traj_node.get_logger().info("[omni_traj] Reached max_laps; disabling looping.")
+    else:
+        traj_node.get_logger().info("[omni_traj] At last waypoint; looping disabled. Holding last.")
 
-    return idx
+def _wp_obstacles_from_path(traj_node: TrajNode, radius: float) -> List[Obstacle]:
+    """Make a 2D circular obstacle (E,N) from every waypoint in the mission."""
+    obs: List[Obstacle] = []
+    for (E, N, _U) in getattr(traj_node, "path_enu", []):
+        obs.append(Obstacle(center=(float(E), float(N)), radius=float(radius)))
+    return obs
 
-def unpack_optimal_control_results(
-        optimal_control_results: Dict[str, Any]) -> Tuple[Dict[str, np.array], Dict[str, np.array]]:
+def _mask_exclusions_for_active(idx: int, length: int, exclude_neighbors: int) -> set:
     """
-    Unpack the results of the optimal control problem
+    Indices to exclude around the active index (wrap-safe for looping paths).
     """
-    states: Dict[str, np.array] = optimal_control_results['states']
-    controls: Dict[str, np.array] = optimal_control_results['controls']
+    if length == 0 or idx < 0:
+        return set()
+    to_exclude = {idx}
+    for k in range(1, exclude_neighbors + 1):
+        to_exclude.add((idx - k) % length)
+        to_exclude.add((idx + k) % length)
+    return to_exclude
 
-    return states, controls
-
-
-def get_time_idx(dt: float, solution_time: float,
-                 idx_buffer: int = 0) -> int:
+def _set_obstacles_on_solver(ocp: SourceOptimalControl, obstacles: List[Obstacle]) -> None:
     """
-    Args:
-        dt (float): time step
-        solution_time (float): time it took to solve the problem
-        idx_buffer (int): buffer for the index
-    Returns:
-        int: index for the time step
-
-    Returns the index of the time step that is closest to the solution time
-    used to buffer the commands sent to the drone
+    Push obstacles to the solver. Supports either a set_obstacles() method
+    or a public 'obs_params' field. Adjust here if your solver expects a different format.
     """
-    time_rounded = round(solution_time, 1)
+    # Serialize to a simple dict list (common for many custom solvers)
+    obs_serialized = [{"cx": o.center[0], "cy": o.center[1], "r": o.radius} for o in obstacles]
 
-    if time_rounded <= 1:
-        time_rounded = 1
+    if hasattr(ocp, "set_obstacles") and callable(getattr(ocp, "set_obstacles")):
+        ocp.set_obstacles(obs_serialized)
+    elif hasattr(ocp, "obs_params"):
+        ocp.obs_params = obs_serialized
+    else:
+        # If your solver needs a different injection method, add it here.
+        pass
 
-    ctrl_idx = dt/time_rounded
-    idx = int(round(ctrl_idx)) + idx_buffer
-
-    return idx
-
+# =================== Main ===================
 
 def main(args=None):
     rclpy.init(args=args)
-    traj_node = OmniTraj()
+    traj_node = TrajNode(node_name="omni_traj")
     rclpy.spin_once(traj_node)
 
-    control_limits_dict: Dict[str, Dict[str, float]] = {
-        'u_phi': {'min': -np.deg2rad(45), 'max': np.deg2rad(45)},
+    # ----- limits / model -----
+    control_limits: Dict[str, Dict[str, float]] = {
+        'u_phi':   {'min': -np.deg2rad(45), 'max': np.deg2rad(45)},
         'u_theta': {'min': -np.deg2rad(10), 'max': np.deg2rad(10)},
-        'u_psi': {'min': -np.deg2rad(30), 'max': np.deg2rad(30)},
-        'v_cmd': {'min': 18, 'max': 22}
+        'u_psi':   {'min': -np.deg2rad(30), 'max': np.deg2rad(30)},
+        'v_cmd':   {'min': 18.0, 'max': 22.0},
     }
-    state_limits_dict: Dict[str, Dict[str, float]] = {
+    state_limits: Dict[str, Dict[str, float]] = {
         'x': {'min': -np.inf, 'max': np.inf},
         'y': {'min': -np.inf, 'max': np.inf},
-        'z': {'min': 30, 'max': 100},
-        'phi': {'min': -np.deg2rad(45), 'max': np.deg2rad(45)},
+        'z': {'min': 30.0,    'max': 100.0},
+        'phi':   {'min': -np.deg2rad(45), 'max': np.deg2rad(45)},
         'theta': {'min': -np.deg2rad(15), 'max': np.deg2rad(15)},
-        'psi': {'min': -np.pi, 'max': np.pi},
-        'v': {'min': 18, 'max': 22}
+        'psi':   {'min': -np.pi,          'max': np.pi},
+        'v':     {'min': 18.0,            'max': 22.0},
     }
+    model: PlaneKinematicModel = build_model(control_limits, state_limits)
 
-    plane_model: PlaneKinematicModel = build_model(
-        control_limits_dict, state_limits_dict)
+    # ----- MPC weights/params -----
+    Q = np.diag([1.0, 1.0, 1.0, 0, 0, 0, 0])
+    R = np.diag([0.2, 0.25, 0.25, 1.0])
+    mpc_params = MPCParams(Q=Q, R=R, N=15, dt=0.1)
 
-    # now we will set the MPC weights for the plane
-    # 0 means we don't care about the specific state variable 1 means we care about it
-    Q: np.diag = np.diag([1.0, 1.0, 1.0, 0, 0, 0, 0])
-    R: np.diag = np.diag([0.2, 0.25, 0.25, 1])
+    # ----- solver + sim -----
+    ocp = SourceOptimalControl(mpc_params=mpc_params, casadi_model=model, obs_params=[])
+    xF = np.array([0, 0, 0, 0, 0, 0, XF_SPEED], dtype=float)
+    u0 = np.array([0, 0, 0, 15], dtype=float)
 
-    # we will now slot the MPC weights into the MPCParams class
-    mpc_params: MPCParams = MPCParams(Q=Q, R=R, N=15, dt=0.1)
-    # formulate your optimal control problem
-
-    # now set your initial conditions for this case its the plane
-    # x0: np.array = np.array([5, 5, 10, 0, 0, 0, 15])
-    xF: np.array = np.array([GOAL_X, GOAL_Y, GOAL_Z, 0, 0, 0, 20])
-    u_0: np.array = np.array([0, 0, 0, 15])
-    obstacle_list: List[Obstacle] = []
-    obstacle_list.append(Obstacle(center=[xF[0], xF[1], xF[2]], radius=8.0))
-    
-    plane_opt_control: SourceOptimalControl  = SourceOptimalControl(
-        mpc_params=mpc_params, casadi_model=plane_model,
-        obs_params=obstacle_list
-    )
-
-    if np.all(np.isnan(traj_node.enu_state)):
-        print("All elements are NaN")
-    else:
-        print("Not all elements are NaN")
-
-    closed_loop_sim: CloseLoopSim = CloseLoopSim(
-        optimizer=plane_opt_control,
+    sim = CloseLoopSim(
+        optimizer=ocp,
         x_init=traj_node.enu_state,
-        x_final=xF,
+        x_final=xF,     # overwritten every tick
         print_every=1000,
-        u0=u_0,
+        u0=u0,
         N=100
     )
 
     if np.all(np.isnan(traj_node.current_enu_controls)):
-        # set to current states
-        traj_node.current_enu_controls = np.array([
-            0, 
-            0, 
-            0, 
-            15])
-    # In main loop:
-    # callback information from drone
-    # update the initial condition and initial control
-    # Compute single step of the closed loop simulation
-    # Get results that are ENU
-    
+        traj_node.current_enu_controls = np.array([0, 0, 0, 15], dtype=float)
+
+    last_wrap_time = 0.0
+
+    # =================== main loop ===================
     while rclpy.ok():
         try:
             rclpy.spin_once(traj_node, timeout_sec=0.1)
-            start_sol_time: float = time.time()
-            closed_loop_sim.x_init = traj_node.enu_state
-            solution: Dict[str, Any] = closed_loop_sim.run_single_step(
+
+            # Require valid state and a loaded path
+            if np.any(np.isnan(traj_node.enu_state)):
+                continue
+            if len(getattr(traj_node, "path_enu", [])) == 0:
+                continue
+
+            # Advance if reached/passed (guard after wrap)
+            if (time.time() - last_wrap_time) >= POST_WRAP_GUARD_S:
+                bumps = 0
+                while _reached_wp(traj_node) and bumps < 10:
+                    before = traj_node.wp_idx
+                    _advance_wp_with_wrap(traj_node)
+                    if traj_node.wp_idx == 0 and before != 0:
+                        last_wrap_time = time.time()
+                    bumps += 1
+
+            # Build goal from ACTIVE waypoint (ENU)
+            awp = _active_wp(traj_node)
+            if awp is not None:
+                xF[:] = [awp[0], awp[1], awp[2], 0.0, 0.0, 0.0, XF_SPEED]
+
+            # -------- Waypoints as obstacles (exclude active +/- neighbors) --------
+            wp_obs: List[Obstacle] = _wp_obstacles_from_path(traj_node, radius=WP_OBS_RADIUS)
+            if EXCLUDE_ACTIVE_WP and len(wp_obs) > 0:
+                L = len(traj_node.path_enu)
+                excl = _mask_exclusions_for_active(traj_node.wp_idx, L, EXCLUDE_NEIGHBORS)
+                wp_obs = [o for j, o in enumerate(wp_obs) if j not in excl]
+
+            # Push obstacle set to solver
+            _set_obstacles_on_solver(ocp, wp_obs)
+
+            # Solve one MPC step
+            t0 = time.time()
+            sim.x_init = traj_node.enu_state
+            sol: Dict[str, Any] = sim.run_single_step(
                 xF=xF,
                 x0=traj_node.enu_state,
-                u0=traj_node.current_enu_controls)
-            delta_sol_time: float = time.time() - start_sol_time
-            # distance
-            distance = np.linalg.norm(
-                np.array(traj_node.enu_state[0:2]) - np.array(xF[0:2]))
-            print("Distance: ", distance)
-            # publish the trajectory
-            traj_node.publish_traj(solution, delta_sol_time,
-                                idx_buffer=1)
+                u0=traj_node.current_enu_controls
+            )
+            dt = time.time() - t0
+
+            # Logging
+            dist_xy = np.linalg.norm(traj_node.enu_state[:2] - xF[:2])
+            print(f"[omni_traj] wp_idx={traj_node.wp_idx} dist→goal: {dist_xy:.1f} m  "
+                  f"obs={len(wp_obs)}  solve: {dt*1000:.1f} ms")
+
+            # Publish (note: TrajNode.publish_traj expects z_goal THEN delta time)
+            traj_node.publish_traj(sol, xF[2], dt, idx_buffer=1)
+
         except KeyboardInterrupt:
             print("Keyboard interrupt")
             break
-    
+
     traj_node.destroy_node()
     rclpy.shutdown()
-    return 
+    return
 
 if __name__ == "__main__":
     main()
