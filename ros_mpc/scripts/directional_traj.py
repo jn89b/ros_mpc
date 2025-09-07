@@ -47,6 +47,11 @@ U_THETA_IDX = 1
 U_PSI_IDX = 2
 V_CMD_IDX = 3
 
+# --- tuning thresholds (meters) ---
+XY_REACH_M = 15.0      # horizontal radius to call it reached
+Z_REACH_M  = 10.0      # vertical window
+MAX_IDX_LIM = 10       # safety to avoid infinite loops when WPs are stacked
+
 
 def wrap_to_pi(angle: float) -> float:
     """
@@ -90,11 +95,15 @@ class DirectionalTraj(Node):
     def __init__(self,
                  pub_freq: int = 100,
                  sub_freq: int = 100,
+                 XY_reach_m: float = XY_REACH_M,
+                 Z_reach_m: float = Z_REACH_M,
                  save_states: bool = False,
                  sub_to_mavros: bool = True):
         super().__init__('directional_traj')
         self.pub_freq = pub_freq
         self.sub_freq = sub_freq
+        self.XY_REACH_M: float = XY_reach_m
+        self.Z_REACH_M: float = Z_reach_m
         # intialize an array of nan
         self.num_states = 7
         self.enu_state: np.array = np.array([np.nan]*self.num_states)
@@ -128,7 +137,7 @@ class DirectionalTraj(Node):
         self.dz_controller: PID = PID(
             kp=0.1, ki=0.0, kd=0.01,
             min_constraint=np.deg2rad(-12),
-            max_constraint=np.deg2rad(10),
+            max_constraint=np.deg2rad(12),
             use_derivative=True,
             dt = 0.025)
         
@@ -163,6 +172,11 @@ class DirectionalTraj(Node):
         self._pull_timeout_s = 5.0
         self._pull_started_at = 0.0
         self._last_path_update = 0.0
+        
+        # mission looping / resets
+        self.loop_mission: bool = True     # set False to stop at last WP
+        self.lap_count: int = 0            # increments every time we wrap
+        self.max_laps: int | None = None   # e.g., 3 to stop after 3 laps; None = infinite
 
 
     def _cache_gps_waypoints(self, msg: WaypointList) -> List[Tuple[float, float, float]]:
@@ -292,8 +306,76 @@ class DirectionalTraj(Node):
         self.get_logger().info("Home set...")
         self._pull_in_flight = False
         
+    def _nearest_segment_and_s(self, p: np.ndarray) -> Tuple[int, float, np.ndarray, np.ndarray]:
+        """
+        Return (seg_idx, s, proj, seg_vec) for nearest projection onto the polyline.
+        p is ENU position [E,N,U].
+        """
+        best = (0, 0.0, None, None)
+        best_d2 = float('inf')
+        for i in range(len(self.path_enu)-1):
+            a = np.array(self.path_enu[i])
+            b = np.array(self.path_enu[i+1])
+            ab = b - a
+            ab2 = np.dot(ab, ab) + 1e-9
+            s = np.clip(np.dot(p - a, ab) / ab2, 0.0, 1.0)
+            proj = a + s*ab
+            d2 = np.dot(p - proj, p - proj)
+            if d2 < best_d2:
+                best_d2 = d2
+                best = (i, s, proj, ab)
+        return best
+
+    def _nearest_segment_and_s_window(self, p: np.ndarray, start_i: int, end_i: int):
+        best = (start_i, 0.0, None, None)
+        best_d2 = float('inf')
+        start_i = max(0, start_i)
+        end_i   = min(len(self.path_enu)-2, end_i)  # inclusive range of segment starts
+        for i in range(start_i, end_i+1):
+            a = np.array(self.path_enu[i])
+            b = np.array(self.path_enu[i+1])
+            ab = b - a
+            ab2 = np.dot(ab, ab) + 1e-9
+            s = np.clip(np.dot(p - a, ab) / ab2, 0.0, 1.0)
+            proj = a + s*ab
+            d2 = np.dot(p - proj, p - proj)
+            if d2 < best_d2:
+                best_d2 = d2
+                best = (i, s, proj, ab)
+        return best
+
+    def _lookahead_point(self, p: np.ndarray, lookahead_m: float) -> np.ndarray:
+        # Search only around current progress
+        window = 1   # allow current segment +/-1
+        idx, s, proj, ab = self._nearest_segment_and_s_window(
+            p, self.wp_idx - window, self.wp_idx + window
+        )
+
+        remain = lookahead_m
+        seg_len = np.linalg.norm(ab)
+        if seg_len > 1e-6:
+            dist_on_seg = (1.0 - s) * seg_len
+            if remain <= dist_on_seg:
+                return proj + (remain / seg_len) * ab
+            remain -= dist_on_seg
+
+        i = idx + 1
+        end_i = min(len(self.path_enu) - 1, self.wp_idx + window + 1)
+        while i < end_i:
+            a = np.array(self.path_enu[i])
+            b = np.array(self.path_enu[i+1])
+            ab = b - a
+            seg_len = np.linalg.norm(ab)
+            if remain <= seg_len:
+                return a + (remain / seg_len) * ab
+            remain -= seg_len
+            i += 1
+        return np.array(self.path_enu[min(end_i, len(self.path_enu)-1)])
+
+
     def publish_traj(self,
                      solution: Dict[str, Any],
+                     z_goal: float,
                      delta_sol_time: float,
                      idx_buffer:int = 0) -> None:
         """
@@ -316,7 +398,7 @@ class DirectionalTraj(Node):
         traj_msg.y = ned_states['y'].tolist()
         traj_msg.z = ned_states['z'].tolist()
         traj_msg.roll = ned_states['phi'].tolist()
-        dz:float = GOAL_Z - self.enu_state[2]
+        dz:float = z_goal - self.enu_state[2]
         if self.dz_controller.prev_error is None:
             self.dz_controller.prev_error = 0.0
             
@@ -414,6 +496,68 @@ class DirectionalTraj(Node):
         # get magnitude of velocity
         self.enu_state[6] = np.sqrt(vx**2 + vy**2 + vz**2)
 
+    def _active_wp(self) -> np.ndarray | None:
+        """Return the current ENU waypoint as np.array([E,N,U]) or None if no path."""
+        if self.wp_idx >= len(self.path_enu):
+            return None
+        E, N, U = self.path_enu[self.wp_idx]
+        return np.array([E, N, U], dtype=float)
+
+    def _prev_wp(self) -> np.ndarray | None:
+        if self.wp_idx <= 0 or self.wp_idx-1 >= len(self.path_enu):
+            return None
+        E, N, U = self.path_enu[self.wp_idx - 1]
+        return np.array([E, N, U], dtype=float)
+
+    def _reached_wp(self) -> bool:
+        """Reached = within XY_REACH_M horizontally AND within Z_REACH_M vertically,
+        OR we have 'passed' it along-track (helps with tight turns)."""
+        wp = self._active_wp()
+        if wp is None:
+            return False
+        p_enu = self.enu_state[X_IDX:Z_IDX+1]
+        d_vec   = p_enu- wp
+        d_xy    = np.linalg.norm(d_vec[:Z_IDX])
+        dz      = abs(d_vec[Z_IDX])
+        # near    = (d_xy <= self.XY_REACH_M) and (dz <= self.Z_REACH_M)
+        distance = np.linalg.norm(d_vec)
+        total_reach = np.sqrt(self.XY_REACH_M**2 + self.Z_REACH_M**2)
+        if distance <= total_reach:
+            near = True
+        else:
+            near = False
+        # along-track pass check: if we are beyond the waypoint w.r.t the segment direction
+        prev_wp = self._prev_wp()
+        passed  = False
+        if prev_wp is not None:
+            seg = wp - prev_wp
+            # if projection of (p - wp) on segment direction is positive, we are past wp
+            passed = np.dot(p_enu - wp, seg) > 0.0
+
+        return near or passed
+
+    def _advance_wp(self) -> None:
+        """Advance to next waypoint; wrap to 0 if at end and looping is enabled."""
+        if len(self.path_enu) == 0:
+            return
+        last_idx = len(self.path_enu) - 1
+        if self.wp_idx < last_idx:
+            self.wp_idx += 1
+            self.get_logger().info(f"Advancing to waypoint idx={self.wp_idx}")
+            return
+
+        # we're at the last waypoint
+        if self.loop_mission:
+            self.wp_idx = 0
+            self.lap_count += 1
+            self.get_logger().info(f"Wrapped to first waypoint (lap {self.lap_count}).")
+            if self.max_laps is not None and self.lap_count >= self.max_laps:
+                self.loop_mission = False
+                self.get_logger().info("Reached max_laps; disabling looping.")
+        else:
+            # clamp at last & do nothing further
+            self.get_logger().info("At last waypoint; looping disabled. Holding last.")
+
 
 def build_model(control_limits: Dict[str, Dict[str, float]],
                 state_limits: Dict[str, Dict[str, float]]) -> PlaneKinematicModel:
@@ -448,6 +592,26 @@ def unpack_optimal_control_results(
     return states, controls
 
 
+# Simple fail-safe publisher using a neutral/hold trajectory
+def _publish_hold(traj_node):
+    if np.any(np.isnan(traj_node.enu_state)):
+        return  # no valid state yet
+    from copy import deepcopy
+    cur_enu = deepcopy(traj_node.enu_state)
+    cur_ned = enu_to_ned_states(cur_enu)
+    hold = CtlTraj()
+    hold.idx   = 0
+    hold.x     = [cur_ned[0]] * 4
+    hold.y     = [cur_ned[1]] * 4
+    hold.z     = [cur_ned[2]] * 4
+    hold.roll  = [0.0] * 4
+    hold.pitch = [0.0] * 4
+    hold.yaw   = [0.0] * 4    # relative yaw = 0
+    hold.vx    = [20.0] * 4   # trim speed
+    hold.thrust= [0.55] * 4   # tune for trim airspeed
+    traj_node.pub_traj.publish(hold)
+
+
 def main(args=None):
     rclpy.init(args=args)
     traj_node = DirectionalTraj()
@@ -462,87 +626,103 @@ def main(args=None):
     state_limits_dict: Dict[str, Dict[str, float]] = {
         'x': {'min': -np.inf, 'max': np.inf},
         'y': {'min': -np.inf, 'max': np.inf},
-        'z': {'min': 30, 'max': 100},
+        'z': {'min': 50, 'max': 150},
         'phi': {'min': -np.deg2rad(45), 'max': np.deg2rad(45)},
         'theta': {'min': -np.deg2rad(15), 'max': np.deg2rad(15)},
         'psi': {'min': -np.pi, 'max': np.pi},
-        'v': {'min': 20, 'max': 30.0}
+        'v': {'min': 18, 'max': 30.0}
     }
 
     plane_model: PlaneKinematicModel = build_model(
         control_limits_dict, state_limits_dict)
-    # now we will set the MPC weights for the plane
-    # 0 means we don't care about the specific state variable 1 means we care about it
+
     Q: np.diag = np.diag([1.0, 1.0, 1.0, 0, 0, 0, 0])
     R: np.diag = np.diag([0.25, 0.25, 0.25, 1])
 
-    # we will now slot the MPC weights into the MPCParams class
     mpc_params: MPCParams = MPCParams(Q=Q, R=R, N=15, dt=0.1)
-    # formulate your optimal control problem
     plane_opt_control: PlaneOptControl = PlaneOptControl(
         mpc_params=mpc_params, casadi_model=plane_model)
 
-    if np.all(np.isnan(traj_node.enu_state)):
-        print("All elements are NaN")
-    else:
-        print("Not all elements are NaN")
-
-    # now set your initial conditions for this case its the plane
-    # x0: np.array = np.array([5, 5, 10, 0, 0, 0, 15])
-    xF: np.array = np.array([GOAL_X, GOAL_Y, GOAL_Z, 0, 0, 0, 20])
     u_0: np.array = np.array([0, 0, 0, 15])
 
     closed_loop_sim: CloseLoopSim = CloseLoopSim(
         optimizer=plane_opt_control,
         x_init=traj_node.enu_state,
-        x_final=xF,
+        x_final=np.zeros(7),   # will be overwritten each tick
         print_every=1000,
         u0=u_0,
         N=100
     )
-
-    # enu_traj: Dict[str, Any] = closed_loop_sim.run_single_step(
-    #     xF=xF, u0=u_0)
-
-    # time_duration: float = 20.0
-    # time_start: float = time.time()
-
-    # Initialize the node - X
-    # Initialize optimization routine - X
-    # Initiailze the closed loop simulation - X
-    # recieve callback state information from the drone
-    # set initial states and controls
-    # set final states
-    # run single step
-
-    # In main loop:
-    # callback information from drone
-    # update the initial condition and initial control
-    # Compute single step of the closed loop simulation
-    # Get results that are ENU
     
+    #TODO: The waypoints and subgoals are complelety different need to fix this 
+
     while rclpy.ok():
         try:
             rclpy.spin_once(traj_node, timeout_sec=0.1)
+            # Require a valid state
+            if np.any(np.isnan(traj_node.enu_state)):
+                _publish_hold(traj_node)
+                continue
+
+            # Require a path; if none yet, hold
+            if len(traj_node.path_enu) == 0:
+                _publish_hold(traj_node)
+                continue
+
+            # Advance waypoint index if reached/passed (bounded in case of stacked WPs)
+            bumps = 0
+            max_bumps = 10
+            
+            # These helpers are assumed to exist on the node (as previously added):
+            #   _reached_wp(p_enu) -> bool
+            #   _advance_wp() -> None
+            while hasattr(traj_node, "_reached_wp") and hasattr(traj_node, "_advance_wp") \
+                  and traj_node._reached_wp() and bumps < max_bumps:
+                traj_node._advance_wp()
+                bumps += 1
+
+            # # Choose subgoal: either pure next waypoint or a lookahead point for smoother tracking
+            # if hasattr(traj_node, "_lookahead_point"):
+            #     subgoal = traj_node._lookahead_point(traj_node.enu_state[0:Z_IDX+1], 
+            #                                          traj_node.lookahead_m)
+            # else:
+            #     # fallback to raw active wp
+            #     idx = min(traj_node.wp_idx, max(0, len(traj_node.path_enu)-1))
+            #     subgoal = np.array(traj_node.path_enu[idx], dtype=float)
+            active_wp = traj_node._active_wp()
+            if active_wp is None:
+                traj_node.get_logger().info("No active waypoint; holding.")
+                _publish_hold(traj_node)
+                continue
+            
+            subgoal = active_wp.copy()
+                
+            # Build xF (ENU) for the MPC: [x,y,z,phi,theta,psi,v]
+            xf_speed = 20.0
+            xF = np.array([subgoal[0], subgoal[1], subgoal[2], 0.0, 0.0, 0.0, xf_speed], dtype=float)
+
+            # Solve one MPC step
             start_sol_time: float = time.time()
             closed_loop_sim.x_init = traj_node.enu_state
             solution: Dict[str, Any] = closed_loop_sim.run_single_step(
                 xF=xF,
                 x0=traj_node.enu_state,
-                u0=traj_node.current_enu_controls)
+                u0=traj_node.current_enu_controls
+            )
+            
             delta_sol_time: float = time.time() - start_sol_time
-            distance = np.linalg.norm(
-                np.array(traj_node.enu_state[0:2]) - np.array(xF[0:2]))
-            # print("Distance: ", distance)
-            traj_node.publish_traj(solution, delta_sol_time,
-                                idx_buffer=2)
+            distance = np.linalg.norm(traj_node.enu_state[0:2] - xF[0:2])
+            traj_node.get_logger().info(f"Dist to subgoal: {distance:.1f} m, Sol time: {delta_sol_time*1000:.1f} ms")   
+            # Publish trajectory computed from solution
+            traj_node.publish_traj(solution, xF[Z_IDX], delta_sol_time, idx_buffer=2)
+
         except KeyboardInterrupt:
-            print("Keyboard interrupt")
             break
-    
+
     traj_node.destroy_node()
     rclpy.shutdown()
-    return 
+    return
+
 
 if __name__ == "__main__":
     main()
