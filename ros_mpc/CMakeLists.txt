@@ -52,6 +52,7 @@ install(PROGRAMS
   scripts/waypoint_traj.py
   scripts/omni_traj.py
   scripts/camera_traj.py
+  scripts/engage_traj.py
   DESTINATION lib/${PROJECT_NAME}
 )
 ament_package()

@@ -59,7 +59,7 @@ class PlaneOptControl(OptimalControlProblem):
         R = self.mpc_params.R
 
         x_final = self.P[self.casadi_model.n_states:]
-
+        
         for k in range(self.N):
             states = self.X[:, k]
             controls = self.U[:, k]

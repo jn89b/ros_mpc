@@ -20,7 +20,7 @@ from ros_mpc.rotation_utils import (ned_to_enu_states,
 from ros_mpc.PlaneOptControl import PlaneOptControl
 from optitraj.utils.data_container import MPCParams
 from optitraj.close_loop import CloseLoopSim
-from rl_ros.PID import FirstOrderFilter, PID
+# from rl_ros.PID import FirstOrderFilter, PID
 
 from typing import List, Dict, Any, Tuple
 
@@ -308,10 +308,10 @@ def main(args=None):
 	state_limits_dict: Dict[str, Dict[str, float]] = {
 		'x': {'min': -np.inf, 'max': np.inf},
 		'y': {'min': -np.inf, 'max': np.inf},
-		'z': {'min': 30, 'max': 100},
+		'z': {'min': 30, 'max': },
 		'chi': {'min': -np.pi, 'max': np.pi},
 		'gamma': {'min': -np.deg2rad(15), 'max': np.deg2rad(15)},
-		'v': {'min': 18, 'max': 25.0}
+		'v': {'min': 21, 'max': 25.0}
 	}
 
 	plane_model: SimpleKinematicModel = build_model(

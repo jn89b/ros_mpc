@@ -23,7 +23,7 @@ from optitraj.utils.data_container import MPCParams
 from optitraj.close_loop import CloseLoopSim
 from apmuas_ros.drone_math import geodetic_to_cartesian, convert_all_to_cartesian
 
-from rl_ros.PID import FirstOrderFilter, PID
+# from rl_ros.PID import FirstOrderFilter, PID
 from mavros_msgs.srv import WaypointPull
 from mavros_msgs.msg import WaypointList
 from mavros_msgs.msg import HomePosition, State, WaypointReached
@@ -75,6 +75,113 @@ def get_relative_ned_yaw_cmd(
     return wrap_to_pi(yaw_cmd)
 
 
+"""
+Baseline PID controller
+
+Note Include a setpoint filter 
+Setpoint Filter - Using a First Order Lag filter
+https://blog.opticontrols.com/archives/1319#:~:text=A%20first%2Dorder%20lag%20filter%20is%20a%20type,more%20to%20the%20output%20than%20older%20samples**
+https://cookierobotics.com/084/
+"""
+
+class FirstOrderFilter:
+    """
+    First-order filter class for smoothing a setpoint signal.
+    https://en.wikipedia.org/wiki/Low-pass_filter
+    Args:
+        tau (float): Time constant of the filter.
+        dt (float): Time step for the filter.
+        x0 (float): Initial value of the filter.
+    Methods:
+        filter(x: float) -> float:
+            Applies the first-order filter to the input signal.
+    """
+    def __init__(self, tau:float, dt:float, 
+                 x0:float) -> None:
+        self.tau:float = tau
+        self.dt:float = dt
+        self.x0:float = x0
+        self.alpha:float = dt / (tau + dt)
+        
+    def filter(self, x:float) -> float:
+        """
+        Applies the first-order filter to the input signal.
+        Args:
+            x (float): Input signal to be filtered.
+        Returns:
+            float: Filtered output signal.
+        """
+        self.x0 = (1 - self.alpha) * self.x0 + self.alpha * x
+        return self.x0
+
+class PID:
+    """
+    PID controller class for controlling a system with a setpoint and current value.
+    Args:
+        min_constraint (float): Minimum constraint for the output.
+        max_constraint (float): Maximum constraint for the output.
+        use_integral (bool): Flag to use integral term in PID control.
+        use_derivative (bool): Flag to use derivative term in PID control.
+        kp (float): Proportional gain.
+        ki (float): Integral gain.
+        kd (float): Derivative gain.
+        dt (float): Time step for the controller.
+    
+    Methods:
+        compute(setpoint: float, current_value: float, dt: float) -> float:
+            Computes the PID control output based on the setpoint and current value.
+            
+    """
+    def __init__(self,
+        min_constraint:float,
+        max_constraint:float,
+        use_integral:bool = False,
+        use_derivative:bool = False,
+        kp:float=0.05,
+        ki:float=0.0,
+        kd:float=0.0,
+        dt:float=0.05) -> None:
+
+        self.min_constraint:float = min_constraint
+        self.max_constraint:float = max_constraint
+        self.dt:float = dt
+                
+        self.use_integral:bool = use_integral
+        self.use_derivative:bool = use_derivative
+        
+        self.kp:float = kp
+        self.ki:float = ki
+        self.kd:float = kd
+        self.prev_error: float = None
+        self.integral: float = 0.0
+        
+    def compute(self,
+        setpoint:float,
+        current_value:float,
+        dt:float) -> float:
+        
+        error:float = setpoint - current_value
+        derivative:float = (error - self.prev_error) / dt
+        self.integral += error * dt
+        
+        if self.use_integral and self.use_derivative:
+            output = (self.kp * error) + \
+                (self.ki * self.integral) + (self.kd * derivative)
+        elif self.use_integral:
+            output:float = (self.kp * error) + \
+                (self.ki * self.integral)
+        elif self.use_derivative:
+            output:float = (self.kp * error) + (self.kd * derivative)
+        else:
+            output:float = (self.kp * error)
+        
+        self.prev_error = error
+        
+        output = np.clip(output, self.min_constraint, self.max_constraint)
+        
+        return output
+    
+    
 
 class DirectionalTraj(Node):
     """
@@ -132,12 +239,13 @@ class DirectionalTraj(Node):
         self.req = WaypointPull.Request()
         self.future = self.waypoint_client.call_async(self.req)
         
+        self.dz_dt: float = 0.1
         self.dz_controller: PID = PID(
             kp=0.1, ki=0.0, kd=0.01,
             min_constraint=np.deg2rad(-12),
             max_constraint=np.deg2rad(12),
             use_derivative=True,
-            dt = 0.025)
+            dt = self.dz_dt)
         
         # For Ardupilot when we query the waypoints 
         # the first waypoint is the home position
@@ -395,6 +503,7 @@ class DirectionalTraj(Node):
         traj_msg.x = ned_states['x'].tolist()
         traj_msg.y = ned_states['y'].tolist()
         traj_msg.z = ned_states['z'].tolist()
+        print("pitch command", traj_msg.pitch)
         traj_msg.roll = ned_states['phi'].tolist()
         dz:float = z_goal - self.enu_state[2]
         if self.dz_controller.prev_error is None:
@@ -403,11 +512,16 @@ class DirectionalTraj(Node):
         pitch_cmd = self.dz_controller.compute(
             setpoint=dz,
             current_value=0.0,
-            dt=0.05
+            dt=self.dz_dt
         )
         pitch_cmd = np.clip(pitch_cmd, -np.deg2rad(10), np.deg2rad(10))
+        # print("pitch cmd", np.rad2deg(pitch_cmd))
         pitch_array = np.ones(len(ned_states['theta'])) * pitch_cmd
         traj_msg.pitch = pitch_array.tolist()
+        
+        traj_msg.pitch = ned_states['theta'].tolist()
+
+        
         current_ned_yaw: float = yaw_enu_to_ned(self.enu_state[5])
         # traj_msg.yaw = ned_states['psi'].tolist()
         ned_yaw = ned_states['psi'].tolist()
@@ -421,7 +535,7 @@ class DirectionalTraj(Node):
         airspeed_error = states['v'][time_idx] - self.enu_state[6]        
         kp_airspeed:float = 0.25
         airspeed_cmd:float = kp_airspeed * airspeed_error
-        min_thrust:float = 0.4
+        min_thrust:float = 0.3
         max_thrust:float = 0.7
         thrust_cmd:float = np.clip(
             airspeed_cmd, min_thrust, max_thrust)
@@ -605,7 +719,7 @@ def _publish_hold(traj_node):
     hold.roll  = [0.0] * 4
     hold.pitch = [0.0] * 4
     hold.yaw   = [0.0] * 4    # relative yaw = 0
-    hold.vx    = [20.0] * 4   # trim speed
+    hold.vx    = [21.0] * 4   # trim speed
     hold.thrust= [0.55] * 4   # tune for trim airspeed
     traj_node.pub_traj.publish(hold)
 
@@ -619,7 +733,7 @@ def main(args=None):
         'u_phi': {'min': -np.deg2rad(45), 'max': np.deg2rad(45)},
         'u_theta': {'min': -np.deg2rad(10), 'max': np.deg2rad(10)},
         'u_psi': {'min': -np.deg2rad(180), 'max': np.deg2rad(180)},
-        'v_cmd': {'min': 10.0, 'max': 30.0}
+        'v_cmd': {'min': 20.0, 'max': 30.0}
     }
     state_limits_dict: Dict[str, Dict[str, float]] = {
         'x': {'min': -np.inf, 'max': np.inf},
@@ -628,7 +742,7 @@ def main(args=None):
         'phi': {'min': -np.deg2rad(45), 'max': np.deg2rad(45)},
         'theta': {'min': -np.deg2rad(15), 'max': np.deg2rad(15)},
         'psi': {'min': -np.pi, 'max': np.pi},
-        'v': {'min': 18, 'max': 30.0}
+        'v': {'min': 20, 'max': 30.0}
     }
 
     plane_model: PlaneKinematicModel = build_model(
@@ -688,7 +802,7 @@ def main(args=None):
             subgoal = active_wp.copy()
                 
             # Build xF (ENU) for the MPC: [x,y,z,phi,theta,psi,v]
-            xf_speed = 20.0
+            xf_speed = 21
             xF = np.array([subgoal[0], subgoal[1], subgoal[2], 
                            0.0, 0.0, 0.0, xf_speed], dtype=float)
 
@@ -703,7 +817,8 @@ def main(args=None):
             
             delta_sol_time: float = time.time() - start_sol_time
             distance = np.linalg.norm(traj_node.enu_state[0:2] - xF[0:2])
-            traj_node.get_logger().info(f"Dist to subgoal: {distance:.1f} m, Sol time: {delta_sol_time*1000:.1f} ms")   
+            alt_distance = (traj_node.enu_state[2] - xF[2])
+            traj_node.get_logger().info(f"Dist to subgoal: {distance:.1f} m, Altitude Distance: {alt_distance:.1f} m,  Sol time: {delta_sol_time*1000:.1f} ms")   
             # Publish trajectory computed from solution
             traj_node.publish_traj(solution, xF[Z_IDX], delta_sol_time, idx_buffer=2)
 
