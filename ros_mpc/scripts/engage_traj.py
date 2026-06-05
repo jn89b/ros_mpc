@@ -8,7 +8,13 @@ from rclpy.node import Node
 import mavros
 from mavros.base import SENSOR_QOS
 from nav_msgs.msg import Odometry
-from typing import Optional, Dict
+
+# MAVROS Mission & Global Position Imports
+from mavros_msgs.srv import WaypointPull
+from mavros_msgs.msg import WaypointList, Waypoint, HomePosition
+
+from typing import Optional, Dict, List, Tuple
+from scipy.constants import g
 
 # Assuming you update your custom message to handle kinematic targets
 from drone_interfaces.msg import CtlTraj
@@ -18,6 +24,9 @@ from ros_mpc.models.tecs_model import ArduPlaneGuidanceModel
 from ros_mpc.TecsOptimalControl import TrajectoryOptControlOuterLoop
 from optitraj.utils.data_container import MPCParams
 from optitraj.close_loop import CloseLoopSim
+
+# Earth radius in meters
+EARTH_RADIUS = 6371000  
 
 # Array Indices for 6-State Outer Loop
 X_IDX = 0
@@ -32,7 +41,103 @@ U_V_IDX = 0
 U_PSI_IDX = 1
 U_VZ_IDX = 2
 
-### Utility functions ##
+# ==========================================
+# DRONE MATH UTILITIES
+# ==========================================
+class DroneMath():
+	@staticmethod
+	def compute_loiter_radius_m(mount_angle_phi_deg:float, 
+								cam_range_m:float, 
+								ccw_loiter:bool,
+								roll_limit_deg:float) -> float:
+		neg_roll_deg = ((-1) * roll_limit_deg)
+		if mount_angle_phi_deg < neg_roll_deg:
+			mount_angle_phi_deg = neg_roll_deg
+		elif mount_angle_phi_deg > roll_limit_deg:
+			mount_angle_phi_deg = roll_limit_deg
+		
+		if ccw_loiter:
+			return (-1)*(math.sin(math.radians(mount_angle_phi_deg)) * cam_range_m)
+		return (math.sin(math.radians(mount_angle_phi_deg)) * cam_range_m)
+	
+	@staticmethod
+	def calc_velocity(mount_angle_phi_deg:float, cam_range_m:float, ccw_loiter:bool) -> float:
+		loiter_radius:float = DroneMath.compute_loiter_radius_m(mount_angle_phi_deg=mount_angle_phi_deg,
+																cam_range_m=cam_range_m,
+																ccw_loiter=ccw_loiter,
+																roll_limit_deg=45.0) # Assumed default for signature
+		mount_angle_rad = math.radians(mount_angle_phi_deg)
+		if ccw_loiter:
+			return math.sqrt((-1)*(loiter_radius) * g * math.tan(mount_angle_rad))
+		return math.sqrt(loiter_radius * g * math.tan(mount_angle_rad))
+	
+	@staticmethod
+	def compute_altitude_m(cam_range_m_alt:float,
+						   max_roll_tan:float,
+						   max_alt_m:float,
+						   min_alt_m:float) -> float:
+		max_roll_rad = np.deg2rad(max_roll_tan)
+		calc_alt = (cam_range_m_alt)*(math.cos(max_roll_rad))
+		if calc_alt > max_alt_m:
+			return max_alt_m
+		elif calc_alt < min_alt_m:
+			return min_alt_m
+		else:
+			return calc_alt
+
+	@staticmethod
+	def realtime_loiter_radius(mount_angle_phi_deg:float, 
+								cam_range_m:float,
+								roll_limit_deg:float) -> float:
+		neg_roll_deg = ((-1) * roll_limit_deg)
+		if mount_angle_phi_deg < neg_roll_deg:
+			mount_angle_phi_deg = neg_roll_deg
+		elif mount_angle_phi_deg > roll_limit_deg:
+			mount_angle_phi_deg = roll_limit_deg
+		
+		return (math.sin(math.radians(mount_angle_phi_deg)) * cam_range_m)
+	
+	@staticmethod
+	def calculate_loiter_time(num_loiters:int, loiter_radius: float, aircraft_velocity_mps: float) -> float: 
+		loiter_circumference: float = (2) * (np.pi) * (loiter_radius)
+		total_distance: float = loiter_circumference * num_loiters
+		loiter_time = (total_distance) / aircraft_velocity_mps
+		return loiter_time
+
+	@staticmethod
+	def deg2rad(deg: float) -> float:
+		return deg * math.pi / 180 
+
+	@staticmethod
+	def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float: 
+		dlat: float = DroneMath.deg2rad(lat2 - lat1)
+		dlon: float = DroneMath.deg2rad(lon2 - lon1)
+		lat1 = DroneMath.deg2rad(lat1)
+		lat2 = DroneMath.deg2rad(lat2)
+
+		a: float = math.sin(dlat/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2
+		c: float = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+		return EARTH_RADIUS * c
+
+	@staticmethod
+	def initial_bearing(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+		lat1 = DroneMath.deg2rad(lat1)
+		lat2 = DroneMath.deg2rad(lat2)
+		dlon = DroneMath.deg2rad(lon2 - lon1)
+
+		x = math.sin(dlon) * math.cos(lat2)
+		y = math.cos(lat1)*math.sin(lat2) - math.sin(lat1)*math.cos(lat2)*math.cos(dlon)
+		return math.atan2(x, y)
+
+	@staticmethod
+	def geodetic_to_cartesian(origin_lat: float, origin_lon: float, target_lat: float, target_lon: float) -> Tuple[float, float]:
+		distance: float = DroneMath.haversine_distance(origin_lat, origin_lon, target_lat, target_lon)
+		bearing: float = DroneMath.initial_bearing(origin_lat, origin_lon, target_lat, target_lon)
+		x: float = distance * math.sin(bearing)
+		y: float = distance * math.cos(bearing)
+		return x, y
+
+### Additional Utility functions ##
 def convert_yaw_enu_to_ned(yaw_enu_rad:float) -> float:
 	return (math.pi / 2.0) - yaw_enu_rad
 
@@ -40,16 +145,14 @@ def wrap_to_2pi(angle_rad:float) -> float:
 	return angle_rad % (2.0 * math.pi) # Wraps to [0, 360)
 
 def compute_bank_angle(yaw_rate: float, airspeed: float) -> float:
-	gravity: float = 9.81
 	acc: float = yaw_rate * airspeed
-	bank_angle_rad: float = np.arctan2(acc, gravity)
+	bank_angle_rad: float = np.arctan2(acc, g)
 	return bank_angle_rad
 
 def compute_max_yaw_rate(max_bank_angle_rad: float, airspeed: float) -> float:
 	if airspeed <= 0.1:
 		return 0.0
-	gravity: float = 9.81
-	max_yaw_rate: float = (gravity * np.tan(max_bank_angle_rad)) / airspeed
+	max_yaw_rate: float = (g * np.tan(max_bank_angle_rad)) / airspeed
 	return max_yaw_rate
 
 
@@ -60,10 +163,13 @@ class MissionManager:
 	"""
 	Manages a queue of kinematic waypoints and handles arrival logic.
 	"""
-	def __init__(self, acceptance_radius_m: float = 25.0):
+	def __init__(self, acceptance_radius_m: float = 25.0, 
+				 total_num_laps:int = 1):
 		self.waypoints = []
 		self.current_idx = 0
 		self.acceptance_radius = acceptance_radius_m
+		self.total_num_laps:int = total_num_laps
+		self.current_lap_idx:int = 0
 
 	def add_waypoint(self, x: float, y: float, alt: float, speed: float) -> None:
 		"""Appends a new target to the mission queue."""
@@ -76,21 +182,22 @@ class MissionManager:
 
 	def get_current_target(self) -> Optional[Dict[str, float]]:
 		"""Returns the active waypoint dictionary, or None if the mission is complete."""
+		if self.current_idx >= len(self.waypoints) and self.current_lap_idx <= self.total_num_laps:
+			self.current_idx = 0
+			self.current_lap_idx += 1
+			return self.waypoints[self.current_idx]
+		if self.current_idx >= len(self.waypoints) and self.current_lap_idx >= self.total_num_laps:
+			return None
 		if self.current_idx < len(self.waypoints):
 			return self.waypoints[self.current_idx]
+
 		return None 
 
 	def check_and_advance(self, current_x: float, current_y: float) -> bool:
-		"""
-		Calculates distance to the current target. 
-		If within the acceptance radius, advances the index.
-		Returns True if a waypoint was just reached.
-		"""
 		target = self.get_current_target()
 		if not target:
 			return False
 
-		# Calculate 2D Euclidean distance to target
 		dist_to_target = math.hypot(target['x'] - current_x, target['y'] - current_y)
 		
 		if dist_to_target <= self.acceptance_radius:
@@ -107,25 +214,79 @@ class EngageTrajNodeOuter(Node):
 	def __init__(self, pub_freq: int = 10):
 		super().__init__('outer_loop_mpc_publisher')
 		self.get_logger().info('Starting Outer-Loop Kinematic MPC Publisher')
-	   
+		
 		self.pub_freq = pub_freq
-	   
-		# --- 6-STATE ARRAY: [x, y, h, V, psi, vz] ---
 		self.state_info = np.full(6, np.nan)
-	   
-		# --- 3-CONTROL ARRAY: [V_cmd, psi_cmd, vz_cmd] ---
 		self.control_info = np.full(3, 0.0)
-	   
+		
 		# Publishers & Subscribers
 		self.traj_pub = self.create_publisher(CtlTraj, '/trajectory', self.pub_freq)
-	   
-		# MAVROS Local Odometry (Typically ENU Frame in ROS)
+		
 		self.state_sub = self.create_subscription(
 			Odometry,
 			'mavros/local_position/odom',
 			self.mavros_state_callback,
 			qos_profile=SENSOR_QOS
 		)
+
+		# Home Position Subscriber (used as Cartesian Origin)
+		self.home_lat = None
+		self.home_lon = None
+		# self.home_sub = self.create_subscription(
+		#     HomePosition, 
+		#     'mavros/home_position/home', 
+		#     self.home_callback, 
+		#     10
+		# )
+
+		# Waypoint Pull Client & Subscriber
+		self.wp_client = self.create_client(WaypointPull, 'mavros/mission/pull')
+		self.wp_sub = self.create_subscription(
+			WaypointList,
+			'mavros/mission/waypoints',
+			self.waypoints_callback,
+			10
+		)
+		self.mission_waypoints = []
+		self.waypoints_received = False
+
+	def home_callback(self, msg: HomePosition) -> None:
+		if self.home_lat is None:
+			self.home_lat = msg.geo.latitude
+			self.home_lon = msg.geo.longitude
+			self.get_logger().info(f"Home Position Locked: Lat {self.home_lat}, Lon {self.home_lon}")
+
+	def request_waypoint_pull(self) -> None:
+		while not self.wp_client.wait_for_service(timeout_sec=1.0):
+			self.get_logger().info('WaypointPull service not available, waiting again...')
+		
+		req = WaypointPull.Request()
+		self.future = self.wp_client.call_async(req)
+		self.future.add_done_callback(self.pull_response_callback)
+
+	def pull_response_callback(self, future) -> None:
+		try:
+			response = future.result()
+			if response.success:
+				self.get_logger().info(f"Successfully pulled {response.wp_received} WPs from FCU.")
+			else:
+				self.get_logger().error("Failed to pull waypoints from FCU.")
+		except Exception as e:
+			self.get_logger().error(f"Service call failed: {e}")
+
+	def waypoints_callback(self, msg: WaypointList) -> None:
+		if not self.waypoints_received and len(msg.waypoints) > 0:
+			for i, w in enumerate(msg.waypoints):
+				w: Waypoint
+				print("w", w)
+				if i == 0:
+					self.home_lat_dg = w.x_lat
+					self.home_lon_dg = w.y_long
+				else:
+					self.mission_waypoints.append(w)
+			print("waypoints are", self.mission_waypoints)
+			self.waypoints_received = True
+			self.get_logger().info(f"Received {len(msg.waypoints)} waypoints from MAVROS topic.")
 
 	def mavros_state_callback(self, msg: Odometry) -> None:
 		self.state_info[X_IDX] = msg.pose.pose.position.x
@@ -142,7 +303,7 @@ class EngageTrajNodeOuter(Node):
 		vx = msg.twist.twist.linear.x
 		vy = msg.twist.twist.linear.y
 		vz = msg.twist.twist.linear.z
-	   
+		
 		self.state_info[V_IDX] = np.sqrt(vx**2 + vy**2 + vz**2)
 		self.state_info[VZ_IDX] = vz
 
@@ -161,27 +322,29 @@ class EngageTrajNodeOuter(Node):
 						delta_sol_time: float,
 						mpc_params: MPCParams,
 						desired_alt_m:float,
+						final_target:np.array = None,
 						idx_buffer: int = 1) -> None:
-		"""Parses CloseLoopSim nested dict and publishes the kinematic trajectory."""
 		states = solution['states']
 		controls = solution['controls']
-	   
+		
 		idx_step = self.get_time_idx(mpc_params, delta_sol_time, idx_buffer)
 		max_idx = len(states['x']) - 1
 		idx_step = min(idx_step, max_idx)
 		idx_step = -1
 
-		v_cmd_mps = states['V'][idx_step]
 		v_cmd_mps = 23.0
 		psi_cmd_rad_enu = states['psi'][idx_step]
 
-		x_pred = states['x'][idx_step]
-		y_pred = states['y'][idx_step]
+		if final_target is None:
+			x_pred = states['x'][idx_step]
+			y_pred = states['y'][idx_step]
+		else:
+			x_pred = final_target[X_IDX]
+			y_pred = final_target[Y_IDX]
 
 		airspeed = self.state_info[V_IDX]
 		safe_airspeed = max(airspeed, 1.0)
 
-		# 1. Define the airframe's physical limits (Old setup left intact)
 		max_bank_deg = 45.0 
 		max_yaw_rate_rad_s = compute_max_yaw_rate(
 			max_bank_angle_rad=np.deg2rad(max_bank_deg),
@@ -189,39 +352,26 @@ class EngageTrajNodeOuter(Node):
 		
 		look_ahead_s:float = 1.5
 		max_turn_threshold = max_yaw_rate_rad_s * look_ahead_s
-	   
-		# 2. Calculate the raw Line-of-Sight target
+		
 		raw_target_heading = self.compute_los(x_pred, y_pred)
 		current_heading = self.state_info[PSI_IDX]
 
-		# 3. Calculate the shortest angular difference mapped to [-pi, pi]
 		heading_error = np.arctan2(np.sin(raw_target_heading - current_heading),
 								   np.cos(raw_target_heading - current_heading))
-	   
-		# 4. Define your threshold (e.g., maximum 45 degrees of change per update)
-		# max_turn_threshold = math.radians(55.0)
-
-		# 5. Clip the error
+		
 		clipped_error = np.clip(heading_error, -max_turn_threshold, max_turn_threshold)
-		# we will check if the clipped error will exceed our desired bank angle 
+		
 		attempted_yaw_rate:float = clipped_error/look_ahead_s
 		predicted_roll_rad = compute_bank_angle(yaw_rate=attempted_yaw_rate,
 			airspeed=safe_airspeed)
-		print("yaw rate", math.degrees(attempted_yaw_rate))
-		print("predicted roll deg", math.degrees(predicted_roll_rad))
-		# 6. Apply the clipped delta to the current heading
+			
 		psi_cmd_rad_enu = current_heading + clipped_error
-		
 		vz_cmd_mps_enu = controls['vz_cmd'][idx_step]
 		
 		psi_cmd_rad_ned = convert_yaw_enu_to_ned(psi_cmd_rad_enu)
 		psi_cmd_rad_ned = wrap_to_2pi(psi_cmd_rad_ned) 
 		psi_cmd_deg_ned = math.degrees(psi_cmd_rad_ned)
 
-		print("x,y", states['x'][idx_step], states['y'][idx_step])
-		print("predicted state", np.rad2deg(states['psi'][PSI_IDX]))
-		print("actual state", np.rad2deg(self.state_info[PSI_IDX]))
-	   
 		vz_cmd_cms = vz_cmd_mps_enu * 10.0  
 		z_traj = desired_alt_m
 
@@ -233,7 +383,7 @@ class EngageTrajNodeOuter(Node):
 		traj_msg.idx = 4
 
 		self.traj_pub.publish(traj_msg)
-	   
+		
 		self.control_info[U_V_IDX] = v_cmd_mps
 		self.control_info[U_PSI_IDX] = controls['r_cmd'][idx_step]
 		self.control_info[U_VZ_IDX] = vz_cmd_mps_enu
@@ -243,6 +393,7 @@ class EngageTrajNodeOuter(Node):
 		ctrl_idx = mpc_params.dt / time_rounded
 		return int(round(ctrl_idx)) + idx_buffer
 
+
 # ==========================================
 # MAIN EXECUTION LOOP
 # ==========================================
@@ -250,26 +401,59 @@ def main(args=None) -> None:
 	rclpy.init(args=args)    
 	dt = 0.1
 	
-	# Initialize the Waypoint Manager
-	wp_manager = MissionManager(acceptance_radius_m=25.0)
-	
-	# Load Mission Waypoints
-	wp_manager.add_waypoint(0.0, 300.0, 80.0, 23.0)
-	wp_manager.add_waypoint(-300.0, 0.0, 80.0, 23.0)
-	wp_manager.add_waypoint(0.0, -300.0, 80.0, 23.0)
+	wp_manager = MissionManager(acceptance_radius_m=5.0)
+	traj_node = EngageTrajNodeOuter()
 
-	# Get the initial target to setup MPC bounds
+	# --- 1. PULL AND WAIT FOR WAYPOINTS ---
+	traj_node.request_waypoint_pull()
+	traj_node.get_logger().info("Waiting to receive waypoints from MAVROS...")
+	while rclpy.ok() and not traj_node.waypoints_received:
+		rclpy.spin_once(traj_node, timeout_sec=0.1)
+
+	# --- 2. SET CARTESIAN ORIGIN FROM WP 0 ---
+	if len(traj_node.mission_waypoints) < 2:
+		traj_node.get_logger().error("Mission requires at least WP 0 (Home) and one target WP. Exiting.")
+		return
+
+	origin_lat = traj_node.home_lat_dg
+	origin_lon = traj_node.home_lon_dg
+	traj_node.get_logger().info(f"Using WP 0 as Cartesian Origin: Lat {origin_lat:.5f}, Lon {origin_lon:.5f}")
+
+	# --- 3. CONVERT AND LOAD REMAINING WAYPOINTS ---
+	default_cruise_speed = 23.0
+	valid_wps_loaded = 0
+
+	# Slice the list [1:] to skip the home waypoint
+	for wp in traj_node.mission_waypoints[1:]:
+		if wp.command == 16: # NAV_WAYPOINT
+			# Project Geodetic coordinates to Local Cartesian relative to WP 0
+			local_x, local_y = DroneMath.geodetic_to_cartesian(
+				origin_lat=origin_lat, 
+				origin_lon=origin_lon, 
+				target_lat=wp.x_lat, 
+				target_lon=wp.y_long
+			)
+			
+			alt = wp.z_alt
+			wp_manager.add_waypoint(local_x, local_y, alt, default_cruise_speed)
+			valid_wps_loaded += 1
+			traj_node.get_logger().info(f"Loaded WP {valid_wps_loaded}: Local(x={local_x:.1f}, y={local_y:.1f}), Alt={alt:.1f}m")
+
+	if valid_wps_loaded == 0:
+		pass # Note: Changed 'traj_node' standing alone to 'pass' to prevent a syntax error
+		
+	# --- 4. INITIALIZE MPC ---
 	initial_target = wp_manager.get_current_target()
 	v_cruise = initial_target['speed']
 
 	max_roll = np.deg2rad(55)
 	max_yaw_rate = compute_max_yaw_rate(max_bank_angle_rad=max_roll,
-									 airspeed=v_cruise)
+										airspeed=v_cruise)
 	print("max yaw rate", np.rad2deg(max_yaw_rate))
 	
 	plane_model = ArduPlaneGuidanceModel(dt_val=dt, 
-        tau_V=0.5, tau_psi=0.4, tau_z=0.5)
-   
+		tau_V=0.5, tau_psi=0.4, tau_z=0.5)
+	
 	plane_model.set_control_limits({
 		'V_cmd':   {'min': -2.0, 'max': 2.0},
 		'r_cmd': {'min': -max_yaw_rate, 'max': max_yaw_rate},
@@ -279,7 +463,7 @@ def main(args=None) -> None:
 	plane_model.set_state_limits({
 		'x':   {'min': -10000.0, 'max': 10000.0},
 		'y':   {'min': -10000.0, 'max': 10000.0},
-		'h':   {'min': 20.0,     'max': 100.0},
+		'h':   {'min': 20.0,     'max': 125.0},
 		'V':   {'min': 20.0,     'max': 25.0},
 		'psi': {'min': -np.inf,   'max': np.inf},
 		'vz':  {'min': -2.0,     'max': 2.0}
@@ -287,7 +471,7 @@ def main(args=None) -> None:
 
 	Q_matrix = np.array([5.0, 5.0, 5.0, 0.0, 2.0, 1.0])
 	R_matrix = np.array([1.0, 1.0, 1.0]) 
-   
+	
 	mpc_params = MPCParams(Q=Q_matrix, R=R_matrix, N=20, dt=dt)
 
 	plane_opt_control = TrajectoryOptControlOuterLoop(
@@ -298,8 +482,6 @@ def main(args=None) -> None:
 		target_alt=initial_target['alt'],
 		v_cruise=v_cruise
 	)
-   
-	traj_node = EngageTrajNodeOuter()
 
 	closed_loop_sim = CloseLoopSim(
 		optimizer=plane_opt_control,
@@ -307,37 +489,34 @@ def main(args=None) -> None:
 		x_final=np.zeros(6),
 		print_every=1000,
 		u0=traj_node.control_info,
-		N=100
+		N=20
 	)
 
 	print("Waiting for MAVROS odometry telemetry...")
 	for _ in range(10):
 		rclpy.spin_once(traj_node, timeout_sec=0.1)  
 
+	# --- 5. MAIN CONTROL LOOP ---
 	while rclpy.ok():
 		try:
 			rclpy.spin_once(traj_node, timeout_sec=0.01)
-		   
+			
 			if np.any(np.isnan(traj_node.state_info)) or np.any(np.isnan(traj_node.control_info)):
 				traj_node.get_logger().info("Waiting for valid MAVROS telemetry...", throttle_duration_sec=2.0)
 				continue
-		   
-			# --- MISSION MANAGEMENT ---
+			
 			current_x = traj_node.state_info[X_IDX]
 			current_y = traj_node.state_info[Y_IDX]
 			
-			# Check if we hit the waypoint and need to advance
 			if wp_manager.check_and_advance(current_x, current_y):
 				traj_node.get_logger().info(f"Waypoint Reached! Advancing to WP {wp_manager.current_idx}")
 			
-			# Fetch the active target
 			active_target = wp_manager.get_current_target()
 			
 			if not active_target:
-				traj_node.get_logger().info("Mission Complete. Holding last waypoint.")
+				traj_node.get_logger().info("Mission Complete. Holding last waypoint.", throttle_duration_sec=5.0)
 				break 
 
-			# --- DYNAMIC TARGETING ---
 			target_x = active_target['x']
 			target_y = active_target['y']
 			target_alt = active_target['alt']
@@ -345,27 +524,29 @@ def main(args=None) -> None:
 
 			los_target = traj_node.compute_los(target_x=target_x, target_y=target_y)
 			
-			# Update the MPC array dynamically based on the active waypoint
 			xF = np.array([target_x, target_y, target_alt, v_cruise, los_target, 0.0])
-		   
+			
 			start_sol_time = time.time()
-		   
 			closed_loop_sim.x_init = traj_node.state_info
-		   
+			
 			solution = closed_loop_sim.run_single_step(
 				xF=xF,
 				x0=traj_node.state_info,
 				u0=traj_node.control_info
 			)
-		   
+			
 			delta_sol_time = time.time() - start_sol_time
-		   
+			
 			dist_to_target = np.sqrt((target_x - traj_node.state_info[X_IDX])**2 + (target_y - traj_node.state_info[Y_IDX])**2)
 			alt_error = abs(target_alt - traj_node.state_info[Z_IDX])
-			traj_node.get_logger().info(f"WP[{wp_manager.current_idx}] Dist: {dist_to_target:.1f}m, Alt Err: {alt_error:.1f}m, Sol: {delta_sol_time*1000:.1f}ms")  
-
+			traj_node.get_logger().info(f"WP[{wp_manager.current_idx}] Dist: {dist_to_target:.1f}m, Alt Err: {alt_error:.1f}m, Sol: {delta_sol_time*1000:.1f}ms", throttle_duration_sec=1.0)  
+			if dist_to_target <= wp_manager.acceptance_radius * 4:
+				final_target = xF
+			else:
+				final_target = None
+	
 			traj_node.publish_trajectory(solution, delta_sol_time, mpc_params,
-								desired_alt_m=xF[2],idx_buffer=1)
+								desired_alt_m=xF[2],idx_buffer=1, final_target=final_target)
 
 		except KeyboardInterrupt:
 			traj_node.get_logger().info('Keyboard Interrupt: Shutting Down Node')
