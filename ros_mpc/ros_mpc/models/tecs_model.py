@@ -52,10 +52,10 @@ class ArduPlaneGuidanceModel(CasadiModel):
 
     def define_controls(self) -> None:
         self.V_cmd = ca.MX.sym('V_cmd')       # Commanded Airspeed (m/s)
-        self.psi_cmd = ca.MX.sym('psi_cmd')   # Commanded Heading (rad)
+        self.r_cmd = ca.MX.sym('r_cmd')       # Commanded Yaw Rate (rad/s)
         self.vz_cmd = ca.MX.sym('vz_cmd')     # Commanded Climb Rate (m/s)
         
-        self.controls = ca.vertcat(self.V_cmd, self.psi_cmd, self.vz_cmd)
+        self.controls = ca.vertcat(self.V_cmd, self.r_cmd, self.vz_cmd)
         self.n_controls = self.controls.size()[0]
 
     def define_state_space(self) -> None:
@@ -65,9 +65,12 @@ class ArduPlaneGuidanceModel(CasadiModel):
         self.h_dot = self.vz 
         
         # 2. First-order lag dynamics (Simulating ArduPilot's closed-loop response)
-        self.V_dot = (1.0 / self.tau_V) * (self.V_cmd - self.V)
-        self.psi_dot = (1.0 / self.tau_psi) * (self.psi_cmd - self.psi)
-        self.vz_dot = (1.0 / self.tau_z) * (self.vz_cmd - self.vz)
+        #self.V_dot = (1.0 / self.tau_V) #* (self.V_cmd - self.V)
+        self.V_dot = (1.0 / self.tau_V) * (self.V_cmd)
+        self.psi_dot = self.r_cmd * (1/self.tau_psi)
+        # self.psi_dot = (1.0 / self.tau_psi) * (self.psi_cmd)
+        self.vz_dot =  (self.vz_cmd)
+        #self.vz_dot = (1.0 / self.tau_z) * (self.vz_cmd - self.vz)
 
         self.f_dot = ca.vertcat(self.x_dot, self.y_dot, self.h_dot, 
                                 self.V_dot, self.psi_dot, self.vz_dot)
