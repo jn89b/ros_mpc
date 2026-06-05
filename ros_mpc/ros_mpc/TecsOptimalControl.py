@@ -38,7 +38,8 @@ class TrajectoryOptControlOuterLoop(OptimalControlProblem):
     
     def compute_dynamics_cost(self) -> ca.MX:
         cost = 0.0
-        
+        x_final = self.P[self.casadi_model.n_states:]
+
         # We need a 4-element Q matrix: [Q_xy, Q_alt, Q_v, Q_vz_dampening]
         Q_xy  = float(self.mpc_params.Q[0]) # Horizontal tracking
         Q_alt = float(self.mpc_params.Q[2]) # Vertical tracking
@@ -51,6 +52,10 @@ class TrajectoryOptControlOuterLoop(OptimalControlProblem):
         R_slew_vz  = float(self.mpc_params.R[2])
         
         stall_weight:float = 5000.0 # Massive penalty multiplier for getting too slow
+        self.target_x = x_final[0]
+        self.target_y = x_final[1]
+        self.target_alt = x_final[2]
+        self.v_cruise = x_final[3]
         
         for k in range(self.N):
             # Extract States (matching the ArduPlaneGuidanceModel)
