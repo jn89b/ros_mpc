@@ -44,6 +44,7 @@ U_VZ_IDX = 2
 # ==========================================
 # DRONE MATH UTILITIES
 # ==========================================
+
 class DroneMath():
 	@staticmethod
 	def compute_loiter_radius_m(mount_angle_phi_deg:float, 
@@ -137,6 +138,34 @@ class DroneMath():
 		y: float = distance * math.cos(bearing)
 		return x, y
 
+	@staticmethod
+	def check_heading_alignment(current_x: float, current_y: float,
+								current_heading_rad: float,
+								target_x: float, target_y: float,
+								alignment_threshold_deg: float = 10.0) -> bool:
+		"""
+		Calculates the dot product between the current heading vector and the
+		Line of Sight (LOS) vector to determine if they are aligned within a threshold.
+		"""
+		head_x = math.cos(current_heading_rad)
+		head_y = math.sin(current_heading_rad)
+
+		dx = target_x - current_x
+		dy = target_y - current_y
+		dist = math.hypot(dx, dy)
+		
+		# Safety check: avoid division by zero if we are exactly on top of the waypoint
+		if dist < 0.1:
+			return True 
+
+		los_x = dx / dist
+		los_y = dy / dist
+
+		dot_product = (head_x * los_x) + (head_y * los_y)
+		threshold_cos = math.cos(math.radians(alignment_threshold_deg))
+
+		return dot_product >= threshold_cos
+
 ### Additional Utility functions ##
 def convert_yaw_enu_to_ned(yaw_enu_rad:float) -> float:
 	return (math.pi / 2.0) - yaw_enu_rad
@@ -206,6 +235,44 @@ class MissionManager:
 			
 		return False
 
+def compute_ghost_waypoint(target_x: float, target_y: float, 
+						   current_x: float, current_y: float,
+						   current_heading_rad: float, 
+						   wp_manager: MissionManager, 
+						   projection_dist_m: float = 500.0,
+						   alignment_threshold_deg: float = 10.0) -> Tuple[float, float]:
+	
+	is_absolute_final_wp = (wp_manager.current_idx == len(wp_manager.waypoints) - 1)
+	return target_x, target_y
+	if not is_absolute_final_wp:
+		return target_x, target_y
+
+	# Call our modular math function
+	is_aligned = DroneMath.check_heading_alignment(
+		current_x=current_x, current_y=current_y, 
+		current_heading_rad=current_heading_rad,
+		target_x=target_x, target_y=target_y, 
+		alignment_threshold_deg=alignment_threshold_deg
+	)
+
+	if is_aligned:
+		# Lined up: Project along the current heading vector
+		mpc_target_x = target_x + projection_dist_m * math.cos(current_heading_rad)
+		mpc_target_y = target_y + projection_dist_m * math.sin(current_heading_rad)
+	else:
+		# Not lined up: Project along the LOS vector
+		dx = target_x - current_x
+		dy = target_y - current_y
+		dist_to_target = math.hypot(dx, dy)
+		
+		if dist_to_target < 0.1:
+			return target_x, target_y
+			
+		mpc_target_x = target_x + projection_dist_m * (dx / dist_to_target)
+		mpc_target_y = target_y + projection_dist_m * (dy / dist_to_target)
+		print("MPC projecting to:", mpc_target_x, mpc_target_y)
+
+	return mpc_target_x, mpc_target_y
 
 # ==========================================
 # ROS 2 NODE
@@ -232,13 +299,7 @@ class EngageTrajNodeOuter(Node):
 		# Home Position Subscriber (used as Cartesian Origin)
 		self.home_lat = None
 		self.home_lon = None
-		# self.home_sub = self.create_subscription(
-		#     HomePosition, 
-		#     'mavros/home_position/home', 
-		#     self.home_callback, 
-		#     10
-		# )
-
+  
 		# Waypoint Pull Client & Subscriber
 		self.wp_client = self.create_client(WaypointPull, 'mavros/mission/pull')
 		self.wp_sub = self.create_subscription(
@@ -319,59 +380,83 @@ class EngageTrajNodeOuter(Node):
 		return los_heading_rad
 
 	def publish_trajectory(self, solution: dict,
-						delta_sol_time: float,
-						mpc_params: MPCParams,
-						desired_alt_m:float,
-						final_target:np.array = None,
-						idx_buffer: int = 1) -> None:
+						   mpc_params: MPCParams,
+						   desired_alt_m: float,
+						   dist_to_target: float, #
+						   final_target: np.array = None,
+						   idx_buffer: int = 1) -> None:
+		
 		states = solution['states']
 		controls = solution['controls']
 		
-		idx_step = self.get_time_idx(mpc_params, delta_sol_time, idx_buffer)
-		max_idx = len(states['x']) - 1
-		idx_step = min(idx_step, max_idx)
-		idx_step = -1
+		max_lookahead_s = 2.5   # For initiating steep banks
+		min_lookahead_s = 0.2   # For terminal accuracy (minimum 2 steps at dt=0.2)
+		shrink_distance_m = 10.0 # Distance to start tightening the leash
+				
+		if dist_to_target > shrink_distance_m:
+			lookahead_time_s = max_lookahead_s
+			v_cmd_mps = 23.0
+			idx_step = int(lookahead_time_s / mpc_params.dt)
+			max_idx = len(states['x']) - 1
+			idx_step = max(1, min(idx_step, max_idx))
 
-		v_cmd_mps = 23.0
-		psi_cmd_rad_enu = states['psi'][idx_step]
-
-		if final_target is None:
-			x_pred = states['x'][idx_step]
-			y_pred = states['y'][idx_step]
+			override_heading = False
+			if final_target is not None:
+				override_heading = DroneMath.check_heading_alignment(
+					current_x=self.state_info[X_IDX],
+					current_y=self.state_info[Y_IDX],
+					current_heading_rad=self.state_info[PSI_IDX],
+					target_x=final_target[X_IDX],
+					target_y=final_target[Y_IDX],
+					alignment_threshold_deg=1.0
+				)
+			if override_heading:
+				# We are lined up. Ignore CasADi heading and lock in current heading.
+				psi_cmd_rad_enu = self.state_info[PSI_IDX]
+			else:
+				# Not lined up. Let the MPC steer us onto the target.
+				psi_cmd_rad_enu = states['psi'][idx_step]
 		else:
-			x_pred = final_target[X_IDX]
-			y_pred = final_target[Y_IDX]
-
-		airspeed = self.state_info[V_IDX]
-		safe_airspeed = max(airspeed, 1.0)
-
-		max_bank_deg = 45.0 
-		max_yaw_rate_rad_s = compute_max_yaw_rate(
-			max_bank_angle_rad=np.deg2rad(max_bank_deg),
-			airspeed=safe_airspeed)
-		
-		look_ahead_s:float = 1.5
-		max_turn_threshold = max_yaw_rate_rad_s * look_ahead_s
-		
-		raw_target_heading = self.compute_los(x_pred, y_pred)
-		current_heading = self.state_info[PSI_IDX]
-
-		heading_error = np.arctan2(np.sin(raw_target_heading - current_heading),
-								   np.cos(raw_target_heading - current_heading))
-		
-		clipped_error = np.clip(heading_error, -max_turn_threshold, max_turn_threshold)
-		
-		attempted_yaw_rate:float = clipped_error/look_ahead_s
-		predicted_roll_rad = compute_bank_angle(yaw_rate=attempted_yaw_rate,
-			airspeed=safe_airspeed)
+			# Linearly scale down the lookahead as we close in on the target
+			fraction = dist_to_target / shrink_distance_m
+			lookahead_time_s = 1.0
+			v_cmd_mps = 21.0
+			idx_step = int(lookahead_time_s / mpc_params.dt)
+			max_idx = len(states['x']) - 1
+			idx_step = max(1, min(idx_step, max_idx))
 			
-		psi_cmd_rad_enu = current_heading + clipped_error
-		vz_cmd_mps_enu = controls['vz_cmd'][idx_step]
-		
+			# ==========================================
+			# TERMINAL ALIGNMENT CHECK
+			# ==========================================
+			override_heading = False
+			if final_target is not None:
+				override_heading = DroneMath.check_heading_alignment(
+					current_x=self.state_info[X_IDX],
+					current_y=self.state_info[Y_IDX],
+					current_heading_rad=self.state_info[PSI_IDX],
+					target_x=final_target[X_IDX],
+					target_y=final_target[Y_IDX],
+					alignment_threshold_deg=1.0
+				)
+			
+			if override_heading:
+				# We are lined up. Ignore CasADi heading and lock in current heading.
+				psi_cmd_rad_enu = self.state_info[PSI_IDX]
+			else:
+				# Not lined up. Let the MPC steer us onto the target.
+				psi_cmd_rad_enu = states['psi'][idx_step]
+    
 		psi_cmd_rad_ned = convert_yaw_enu_to_ned(psi_cmd_rad_enu)
 		psi_cmd_rad_ned = wrap_to_2pi(psi_cmd_rad_ned) 
 		psi_cmd_deg_ned = math.degrees(psi_cmd_rad_ned)
+		
+		# Ensure we don't grab an index outside the array, and never look at index 0
+		airspeed = self.state_info[V_IDX]
+		safe_airspeed = max(airspeed, 1.0)
 
+		# psi_cmd_rad_enu = current_heading + clipped_error
+		vz_cmd_mps_enu = controls['vz_cmd'][idx_step]
+		
 		vz_cmd_cms = vz_cmd_mps_enu * 10.0  
 		z_traj = desired_alt_m
 
@@ -399,9 +484,15 @@ class EngageTrajNodeOuter(Node):
 # ==========================================
 def main(args=None) -> None:
 	rclpy.init(args=args)    
-	dt = 0.1
+	dt = 0.2
 	
-	wp_manager = MissionManager(acceptance_radius_m=5.0)
+	# places we don't care about 
+	other_distance_threshold:float = 40.0
+	actual_target_distance_threshold:float = 10.0
+	final_projection_distance: float = 200.0
+ 
+	wp_manager = MissionManager(acceptance_radius_m=other_distance_threshold,
+							 total_num_laps=30)
 	traj_node = EngageTrajNodeOuter()
 
 	# --- 1. PULL AND WAIT FOR WAYPOINTS ---
@@ -424,8 +515,9 @@ def main(args=None) -> None:
 	valid_wps_loaded = 0
 
 	# Slice the list [1:] to skip the home waypoint
-	for wp in traj_node.mission_waypoints[1:]:
-		if wp.command == 16: # NAV_WAYPOINT
+	NAV_WAYPOINT:int = 16
+	for wp in traj_node.mission_waypoints[:]:
+		if wp.command == NAV_WAYPOINT: # NAV_WAYPOINT
 			# Project Geodetic coordinates to Local Cartesian relative to WP 0
 			local_x, local_y = DroneMath.geodetic_to_cartesian(
 				origin_lat=origin_lat, 
@@ -437,7 +529,8 @@ def main(args=None) -> None:
 			alt = wp.z_alt
 			wp_manager.add_waypoint(local_x, local_y, alt, default_cruise_speed)
 			valid_wps_loaded += 1
-			traj_node.get_logger().info(f"Loaded WP {valid_wps_loaded}: Local(x={local_x:.1f}, y={local_y:.1f}), Alt={alt:.1f}m")
+			traj_node.get_logger().info(f"Loaded WP {valid_wps_loaded}: Local(x={local_x:.1f}, y={local_y:.1f}), \
+	   		Alt={alt:.1f}m, current Lap={wp_manager.current_lap_idx:.0f}m")
 
 	if valid_wps_loaded == 0:
 		pass # Note: Changed 'traj_node' standing alone to 'pass' to prevent a syntax error
@@ -446,13 +539,13 @@ def main(args=None) -> None:
 	initial_target = wp_manager.get_current_target()
 	v_cruise = initial_target['speed']
 
-	max_roll = np.deg2rad(55)
+	max_roll = np.deg2rad(45)
 	max_yaw_rate = compute_max_yaw_rate(max_bank_angle_rad=max_roll,
 										airspeed=v_cruise)
 	print("max yaw rate", np.rad2deg(max_yaw_rate))
 	
 	plane_model = ArduPlaneGuidanceModel(dt_val=dt, 
-		tau_V=0.5, tau_psi=0.4, tau_z=0.5)
+		tau_V=0.5, tau_psi=0.1, tau_z=0.5)
 	
 	plane_model.set_control_limits({
 		'V_cmd':   {'min': -2.0, 'max': 2.0},
@@ -469,8 +562,8 @@ def main(args=None) -> None:
 		'vz':  {'min': -2.0,     'max': 2.0}
 	})
 
-	Q_matrix = np.array([5.0, 5.0, 5.0, 0.0, 2.0, 1.0])
-	R_matrix = np.array([1.0, 1.0, 1.0]) 
+	Q_matrix = np.array([10.0, 10.0, 5.0, 0.0, 0.0, 0.0])
+	R_matrix = np.array([0.5, 0.1, 0.1]) 
 	
 	mpc_params = MPCParams(Q=Q_matrix, R=R_matrix, N=20, dt=dt)
 
@@ -489,7 +582,7 @@ def main(args=None) -> None:
 		x_final=np.zeros(6),
 		print_every=1000,
 		u0=traj_node.control_info,
-		N=20
+		N=30
 	)
 
 	print("Waiting for MAVROS odometry telemetry...")
@@ -502,7 +595,7 @@ def main(args=None) -> None:
 			rclpy.spin_once(traj_node, timeout_sec=0.01)
 			
 			if np.any(np.isnan(traj_node.state_info)) or np.any(np.isnan(traj_node.control_info)):
-				traj_node.get_logger().info("Waiting for valid MAVROS telemetry...", throttle_duration_sec=2.0)
+				traj_node.get_logger().info("Waiting for valid MAVROS telemetry...", throttle_duration_sec=0.2)
 				continue
 			
 			current_x = traj_node.state_info[X_IDX]
@@ -512,6 +605,8 @@ def main(args=None) -> None:
 				traj_node.get_logger().info(f"Waypoint Reached! Advancing to WP {wp_manager.current_idx}")
 			
 			active_target = wp_manager.get_current_target()
+			if wp_manager.current_idx == (len(wp_manager.waypoints) - 1):
+				wp_manager.acceptance_radius = actual_target_distance_threshold
 			
 			if not active_target:
 				traj_node.get_logger().info("Mission Complete. Holding last waypoint.", throttle_duration_sec=5.0)
@@ -521,14 +616,28 @@ def main(args=None) -> None:
 			target_y = active_target['y']
 			target_alt = active_target['alt']
 			v_cruise = active_target['speed']
+   
+			current_x = traj_node.state_info[X_IDX]
+			current_y = traj_node.state_info[Y_IDX]
+			current_heading = traj_node.state_info[PSI_IDX]
+   
+			# Compute the projected target
+			mpc_target_x, mpc_target_y = compute_ghost_waypoint(
+				target_x=target_x, 
+				target_y=target_y, 
+				current_x=current_x,            
+				current_y=current_y,            
+				current_heading_rad=current_heading,
+				wp_manager=wp_manager, 
+				projection_dist_m=final_projection_distance
+			)
 
 			los_target = traj_node.compute_los(target_x=target_x, target_y=target_y)
 			
-			xF = np.array([target_x, target_y, target_alt, v_cruise, los_target, 0.0])
+			xF = np.array([mpc_target_x, mpc_target_y, target_alt, v_cruise, los_target, 0.0])
 			
 			start_sol_time = time.time()
 			closed_loop_sim.x_init = traj_node.state_info
-			
 			solution = closed_loop_sim.run_single_step(
 				xF=xF,
 				x0=traj_node.state_info,
@@ -538,15 +647,15 @@ def main(args=None) -> None:
 			delta_sol_time = time.time() - start_sol_time
 			
 			dist_to_target = np.sqrt((target_x - traj_node.state_info[X_IDX])**2 + (target_y - traj_node.state_info[Y_IDX])**2)
-			alt_error = abs(target_alt - traj_node.state_info[Z_IDX])
-			traj_node.get_logger().info(f"WP[{wp_manager.current_idx}] Dist: {dist_to_target:.1f}m, Alt Err: {alt_error:.1f}m, Sol: {delta_sol_time*1000:.1f}ms", throttle_duration_sec=1.0)  
-			if dist_to_target <= wp_manager.acceptance_radius * 4:
-				final_target = xF
-			else:
-				final_target = None
+			alt_error = (target_alt - traj_node.state_info[Z_IDX])
+			traj_node.get_logger().info(f"WP[{wp_manager.current_idx}] current Lap={wp_manager.current_lap_idx:.0f} Dist: {dist_to_target:.1f}m, Alt Err: {alt_error:.1f}m, Sol: {delta_sol_time*1000:.1f}ms", throttle_duration_sec=1.0)  
 	
-			traj_node.publish_trajectory(solution, delta_sol_time, mpc_params,
-								desired_alt_m=xF[2],idx_buffer=1, final_target=final_target)
+			traj_node.publish_trajectory(solution=solution, 
+										 mpc_params=mpc_params,
+										 desired_alt_m=xF[2],
+										 dist_to_target=dist_to_target, #
+										 idx_buffer=1, 
+										 final_target=xF)
 
 		except KeyboardInterrupt:
 			traj_node.get_logger().info('Keyboard Interrupt: Shutting Down Node')

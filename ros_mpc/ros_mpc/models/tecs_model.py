@@ -67,10 +67,9 @@ class ArduPlaneGuidanceModel(CasadiModel):
         # 2. First-order lag dynamics (Simulating ArduPilot's closed-loop response)
         #self.V_dot = (1.0 / self.tau_V) #* (self.V_cmd - self.V)
         self.V_dot = (1.0 / self.tau_V) * (self.V_cmd)
-        self.psi_dot = self.r_cmd * (1/self.tau_psi)
+        self.psi_dot = self.r_cmd
         # self.psi_dot = (1.0 / self.tau_psi) * (self.psi_cmd)
-        self.vz_dot = (self.vz_cmd - self.vz)
-        #self.vz_dot = (1.0 / self.tau_z) * (self.vz_cmd - self.vz)
+        self.vz_dot = (1.0 / self.tau_z) * (self.vz_cmd - self.vz)
 
         self.f_dot = ca.vertcat(self.x_dot, self.y_dot, self.h_dot, 
                                 self.V_dot, self.psi_dot, self.vz_dot)
