@@ -491,7 +491,7 @@ def main(args=None) -> None:
 	
 	# places we don't care about 
 	other_distance_threshold:float = 40.0
-	actual_target_distance_threshold:float = 10.0
+	actual_target_distance_threshold:float = 15.0
 	final_projection_distance: float = 200.0
  
 	wp_manager = MissionManager(acceptance_radius_m=other_distance_threshold,
