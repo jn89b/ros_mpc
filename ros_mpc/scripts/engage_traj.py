@@ -391,11 +391,10 @@ class EngageTrajNodeOuter(Node):
 		
 		max_lookahead_s = 2.5   # For initiating steep banks
 		min_lookahead_s = 0.2   # For terminal accuracy (minimum 2 steps at dt=0.2)
-		shrink_distance_m = 10.0 # Distance to start tightening the leash
+		shrink_distance_m = 5.0 # Distance to start tightening the leash
 				
 		if dist_to_target > shrink_distance_m:
 			lookahead_time_s = max_lookahead_s
-			v_cmd_mps = 23.0
 			idx_step = int(lookahead_time_s / mpc_params.dt)
 			max_idx = len(states['x']) - 1
 			idx_step = max(1, min(idx_step, max_idx))
@@ -408,12 +407,14 @@ class EngageTrajNodeOuter(Node):
 					current_heading_rad=self.state_info[PSI_IDX],
 					target_x=final_target[X_IDX],
 					target_y=final_target[Y_IDX],
-					alignment_threshold_deg=1.0
+					alignment_threshold_deg=2.0
 				)
 			if override_heading:
+				v_cmd_mps = 22.0
 				# We are lined up. Ignore CasADi heading and lock in current heading.
 				psi_cmd_rad_enu = self.state_info[PSI_IDX]
 			else:
+				v_cmd_mps = 21.0
 				# Not lined up. Let the MPC steer us onto the target.
 				psi_cmd_rad_enu = states['psi'][idx_step]
 		else:
@@ -436,7 +437,7 @@ class EngageTrajNodeOuter(Node):
 					current_heading_rad=self.state_info[PSI_IDX],
 					target_x=final_target[X_IDX],
 					target_y=final_target[Y_IDX],
-					alignment_threshold_deg=1.0
+					alignment_threshold_deg=2.0
 				)
 			
 			if override_heading:
@@ -488,7 +489,7 @@ def main(args=None) -> None:
 	
 	# places we don't care about 
 	other_distance_threshold:float = 40.0
-	actual_target_distance_threshold:float = 10.0
+	actual_target_distance_threshold:float = 5.0
 	final_projection_distance: float = 200.0
  
 	wp_manager = MissionManager(acceptance_radius_m=other_distance_threshold,
@@ -511,7 +512,7 @@ def main(args=None) -> None:
 	traj_node.get_logger().info(f"Using WP 0 as Cartesian Origin: Lat {origin_lat:.5f}, Lon {origin_lon:.5f}")
 
 	# --- 3. CONVERT AND LOAD REMAINING WAYPOINTS ---
-	default_cruise_speed = 23.0
+	default_cruise_speed = 22.0
 	valid_wps_loaded = 0
 
 	# Slice the list [1:] to skip the home waypoint
@@ -607,7 +608,9 @@ def main(args=None) -> None:
 			active_target = wp_manager.get_current_target()
 			if wp_manager.current_idx == (len(wp_manager.waypoints) - 1):
 				wp_manager.acceptance_radius = actual_target_distance_threshold
-			
+			else:
+				wp_manager.acceptance_radius = other_distance_threshold
+    
 			if not active_target:
 				traj_node.get_logger().info("Mission Complete. Holding last waypoint.", throttle_duration_sec=5.0)
 				break 
@@ -648,7 +651,8 @@ def main(args=None) -> None:
 			
 			dist_to_target = np.sqrt((target_x - traj_node.state_info[X_IDX])**2 + (target_y - traj_node.state_info[Y_IDX])**2)
 			alt_error = (target_alt - traj_node.state_info[Z_IDX])
-			traj_node.get_logger().info(f"WP[{wp_manager.current_idx}] current Lap={wp_manager.current_lap_idx:.0f} Dist: {dist_to_target:.1f}m, Alt Err: {alt_error:.1f}m, Sol: {delta_sol_time*1000:.1f}ms", throttle_duration_sec=1.0)  
+			traj_node.get_logger().info(f"WP[{wp_manager.current_idx}] current Lap={wp_manager.current_lap_idx:.0f} Dist: {dist_to_target:.1f}m, Alt Err: {alt_error:.1f}m, Sol: {delta_sol_time*1000:.1f}ms", \
+       			throttle_duration_sec=0.2)  
 	
 			traj_node.publish_trajectory(solution=solution, 
 										 mpc_params=mpc_params,
