@@ -299,6 +299,7 @@ class EngageTrajNodeOuter(Node):
 		# Home Position Subscriber (used as Cartesian Origin)
 		self.home_lat = None
 		self.home_lon = None
+		self.last_traj_msg = None  
   
 		# Waypoint Pull Client & Subscriber
 		self.wp_client = self.create_client(WaypointPull, 'mavros/mission/pull')
@@ -469,6 +470,7 @@ class EngageTrajNodeOuter(Node):
 		traj_msg.idx = 4
 
 		self.traj_pub.publish(traj_msg)
+		self.last_traj_msg = traj_msg
 		
 		self.control_info[U_V_IDX] = v_cmd_mps
 		self.control_info[U_PSI_IDX] = controls['r_cmd'][idx_step]
@@ -489,7 +491,7 @@ def main(args=None) -> None:
 	
 	# places we don't care about 
 	other_distance_threshold:float = 40.0
-	actual_target_distance_threshold:float = 5.0
+	actual_target_distance_threshold:float = 10.0
 	final_projection_distance: float = 200.0
  
 	wp_manager = MissionManager(acceptance_radius_m=other_distance_threshold,
@@ -603,8 +605,10 @@ def main(args=None) -> None:
 			current_y = traj_node.state_info[Y_IDX]
 			
 			if wp_manager.check_and_advance(current_x, current_y):
+				traj_node.traj_pub.publish(traj_node.last_traj_msg)
+				time.sleep(0.5)
 				traj_node.get_logger().info(f"Waypoint Reached! Advancing to WP {wp_manager.current_idx}")
-			
+    
 			active_target = wp_manager.get_current_target()
 			if wp_manager.current_idx == (len(wp_manager.waypoints) - 1):
 				wp_manager.acceptance_radius = actual_target_distance_threshold
